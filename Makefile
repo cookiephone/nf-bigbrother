@@ -1,79 +1,31 @@
+# Use the Gradle wrapper by default; override with e.g. `make GRADLE=gradle ...`
+GRADLE ?= ./gradlew
 
-config ?= compileClasspath
-version ?= $(shell grep 'Plugin-Version' plugins/nf-bigbrother/src/resources/META-INF/MANIFEST.MF | awk '{ print $$2 }')
-
-ifdef module 
-mm = :${module}:
-else 
-mm = 
-endif 
+# Build the plugin
+assemble:
+	$(GRADLE) assemble
 
 clean:
 	rm -rf .nextflow*
 	rm -rf work
 	rm -rf build
-	rm -rf plugins/*/build
-	./gradlew clean
+	$(GRADLE) clean
 
-compile:
-	./gradlew :nextflow:exportClasspath compileGroovy
-	@echo "DONE `date`"
-
-
-check:
-	./gradlew check
-
-
-#
-# Show dependencies try `make deps config=runtime`, `make deps config=google`
-#
-deps:
-	./gradlew -q ${mm}dependencies --configuration ${config}
-
-deps-all:
-	./gradlew -q dependencyInsight --configuration ${config} --dependency ${module}
-
-#
-# Refresh SNAPSHOTs dependencies
-#
-refresh:
-	./gradlew --refresh-dependencies 
-
-#
-# Run all tests or selected ones
-#
+# Run plugin unit tests
 test:
-ifndef class
-	./gradlew ${mm}test
-else
-	./gradlew ${mm}test --tests ${class}
-endif
+	$(GRADLE) test
 
-# Install the plugin into local nextflow plugins dir
+# Install the plugin into the local Nextflow plugins dir
 install:
-	./gradlew copyPluginZip
-	rm -rf ${HOME}/.nextflow/plugins/nf-bigbrother-${version}
-	cp -r build/plugins/nf-bigbrother-${version} ${HOME}/.nextflow/plugins/
+	$(GRADLE) install
 
-assemble:
-	./gradlew assemble
+# Full start-to-finish test: run the validation pipeline and check its graph
+VERSION := $(shell sed -n "s/^version = '\(.*\)'/\1/p" build.gradle)
+e2e: install
+	cd validation && rm -rf bb_out work .nextflow* && \
+	  nextflow run . -plugins nf-bigbrother@$(VERSION) -ansi-log false && \
+	  python3 assert_dag.py bb_out
 
-#
-# generate build zips under build/plugins
-# you can install the plugin copying manually these files to $HOME/.nextflow/plugins
-#
-buildPlugins:
-	./gradlew copyPluginZip
-
-#
-# Upload JAR artifacts to Maven Central
-#
-upload:
-	./gradlew upload
-
-
-upload-plugins:
-	./gradlew plugins:upload
-
-publish-index:
-	./gradlew plugins:publishIndex
+# Publish the plugin to the Nextflow registry
+release:
+	$(GRADLE) releasePlugin

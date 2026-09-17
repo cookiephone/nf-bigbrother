@@ -1,0 +1,49 @@
+name: nf-bigbrother CI
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+jobs:
+  build:
+    name: Build and test nf-bigbrother
+    if: "!contains(github.event.head_commit.message, '[ci skip]')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        java_version: [17, 21]
+        nextflow_version: ['25.10', '26.04']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Java ${{ matrix.java_version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java_version }}
+          distribution: 'temurin'
+
+      - name: Unit tests
+        run: make test
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.daemon=false'
+
+      - name: Setup Nextflow ${{ matrix.nextflow_version }}
+        uses: nf-core/setup-nextflow@v2
+        with:
+          version: "${{ matrix.nextflow_version }}"
+
+      - name: Install plugin
+        run: make install
+
+      - name: End-to-end test
+        run: make e2e

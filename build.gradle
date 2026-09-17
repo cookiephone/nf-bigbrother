@@ -1,0 +1,15 @@
+plugins {
+    id 'io.nextflow.nextflow-plugin' version '1.0.0-beta.15'
+}
+
+version = '1.0.0'
+
+nextflowPlugin {
+    nextflowVersion = '25.10.0'
+
+    provider = 'Sami Kharma (Zuse Institute Berlin)'
+    className = 'nextflow.bigbrother.BigBrotherPlugin'
+    extensionPoints = [
+        'nextflow.bigbrother.BigBrotherFactory'
+    ]
+}
