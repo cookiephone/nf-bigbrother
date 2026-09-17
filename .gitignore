@@ -1,0 +1,17 @@
+# Ignore Gradle project-specific cache directory
+.gradle
+.idea
+.nextflow*
+
+# Ignore Gradle build output directory
+build
+work
+out
+
+# Ignore test dir
+test/*
+!test/nextflow.config
+
+# Ignore IDE configuration
+.vscode
+.settings
