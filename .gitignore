@@ -1,17 +1,33 @@
-# Ignore Gradle project-specific cache directory
 .gradle
 .idea
-.nextflow*
 
-# Ignore Gradle build output directory
 build
 work
 out
 
-# Ignore test dir
+# Nextflow run artifacts
+.nextflow*
+results
+bb_out
+
+# generated snapshots / graphs
 test/*
 !test/nextflow.config
+*.svg
+*.png
 
-# Ignore IDE configuration
+# local scratch / experiment dirs
+scratch-*
+
+# packaged plugin
+nf-bigbrother-*.zip
+
+# python
+__pycache__
+*.pyc
+
 .vscode
 .settings
+
+old
+visualization

@@ -1,18 +1,24 @@
+package nextflow.bigbrother
+
 import groovy.json.JsonOutput
 
+/**
+ * The workflow instance we build up as the run goes and write out as JSON
+ * (WfCommons-style spec + execution trace) or as a Graphviz physical graph.
+ * The observer "touches" tasks, files and machines as events come in — created
+ * the first time, reused after that.
+ */
+
+/** Runtime measurements of a single task instance. */
 class TaskExecution {
 
     String id = ''
     float runtimeInSeconds = 0.0
     String executedAt = ''
-    float coreCount = 0.0
     float avgCPU = 0.0
     long readBytes = 0
     long writtenBytes = 0
     long memoryInBytes = 0
-    float energyInKWh = 0.0
-    float avgPowerInW = 0.0
-    int priority = 0
     String[] machines = []
     String commandProgram = ''
     String[] commandArguments = []
@@ -22,41 +28,30 @@ class TaskExecution {
     long volCtxt = 0
     long invCtxt = 0
 
-    // Map<String, List> resourceUsageTimeSeries = [
-    //     time_us: [],
-    //     mem_bytes: [],
-    //     cpu_user_ticks: [],
-    //     cpu_sys_ticks: [],
-    // ]
-
     Map toMap() {
         return [
-            id : id,
+            id               : id,
             runtimeInSeconds : runtimeInSeconds,
-            executedAt : executedAt,
-            // coreCount : coreCount,
-            avgCPU : avgCPU,
-            readBytes : readBytes,
-            writtenBytes : writtenBytes,
-            memoryInBytes : memoryInBytes,
-            // energyInKWh : energyInKWh,
-            // avgPowerInW : avgPowerInW,
-            // priority : priority,
-            machines : machines,
-            peak_vmem : peakVmem,
-            peak_rss : peakRss,
-            vol_ctxt : volCtxt,
-            inv_ctxt : invCtxt,
-            command : [
-                program : commandProgram,
-                arguments : commandArguments
+            executedAt       : executedAt,
+            avgCPU           : avgCPU,
+            readBytes        : readBytes,
+            writtenBytes     : writtenBytes,
+            memoryInBytes    : memoryInBytes,
+            machines         : machines,
+            peak_vmem        : peakVmem,
+            peak_rss         : peakRss,
+            vol_ctxt         : volCtxt,
+            inv_ctxt         : invCtxt,
+            command          : [
+                program   : commandProgram,
+                arguments : commandArguments,
             ],
-            // resourceUsageTimeSeries: resourceUsageTimeSeries
         ]
     }
 
 }
 
+/** Hardware description of a machine that executed one or more tasks. */
 class MachineSpecification {
 
     String nodeName = ''
@@ -67,7 +62,6 @@ class MachineSpecification {
     float cpuCoreCount = 0.0
     float cpuSpeedInMHz = 0.0
     String cpuVendor = ''
-
     String bootID = ''
 
     Map toMap() {
@@ -81,35 +75,37 @@ class MachineSpecification {
             cpu           : [
                 coreCount  : cpuCoreCount,
                 speedInMHz : cpuSpeedInMHz,
-                vendor     : cpuVendor
-            ]
+                vendor     : cpuVendor,
+            ],
         ]
     }
 
 }
 
+/** Static description of a task instance and its data dependencies. */
 class TaskSpecification {
 
     String name = ''
     String id = ''
-    String[] parents = []   // infer from files and data channels
-    String[] children = []  // infer from files and data channels
-    String[] inputFiles = []
-    String[] outputFiles = []
+    List<String> parents = []     // inferred from produced/consumed files
+    List<String> children = []    // inferred from produced/consumed files
+    List<String> inputFiles = []
+    List<String> outputFiles = []
 
     Map toMap() {
         return [
-            name : name,
-            id : id,
-            parents : parents,
-            children : children,
-            inputFiles : inputFiles,
+            name        : name,
+            id          : id,
+            parents     : parents,
+            children    : children,
+            inputFiles  : inputFiles,
             outputFiles : outputFiles,
         ]
     }
 
 }
 
+/** A file produced or consumed by the workflow. */
 class FileSpecification {
 
     String id = ''
@@ -117,8 +113,8 @@ class FileSpecification {
 
     Map toMap() {
         return [
-            id : id,
-            sizeInBytes : sizeInBytes
+            id          : id,
+            sizeInBytes : sizeInBytes,
         ]
     }
 
@@ -143,148 +139,170 @@ class WfInstance {
     List<TaskExecution> taskExecutions = []
     List<MachineSpecification> machineSpecifications = []
 
+    private final Map<String, TaskSpecification> taskSpecIndex = [:]
+    private final Map<String, TaskExecution> taskExecIndex = [:]
+    private final Map<String, FileSpecification> fileSpecIndex = [:]
+    private final Map<String, MachineSpecification> machineIndex = [:]
+
     MachineSpecification touchMachineSpecification(String nodeName) {
-        MachineSpecification existing = machineSpecifications.find { spec -> spec.nodeName == nodeName }
+        MachineSpecification existing = machineIndex[nodeName]
         if (existing) {
             return existing
         }
-        MachineSpecification newMachine = new MachineSpecification(nodeName: nodeName)
-        machineSpecifications << newMachine
-        return newMachine
+        MachineSpecification machine = new MachineSpecification(nodeName: nodeName)
+        machineIndex[nodeName] = machine
+        machineSpecifications << machine
+        return machine
     }
 
     FileSpecification touchFileSpecification(String id, long sizeInBytes) {
-        FileSpecification existing = fileSpecifications.find { spec -> spec.id == id }
+        FileSpecification existing = fileSpecIndex[id]
         if (existing) {
             return existing
         }
-        FileSpecification newFile = new FileSpecification(id: id, sizeInBytes: sizeInBytes)
-        fileSpecifications << newFile
-        return newFile
+        FileSpecification file = new FileSpecification(id: id, sizeInBytes: sizeInBytes)
+        fileSpecIndex[id] = file
+        fileSpecifications << file
+        return file
     }
 
     TaskSpecification touchTaskSpecification(String id) {
-        TaskSpecification existing = taskSpecifications.find { spec -> spec.id == id }
+        TaskSpecification existing = taskSpecIndex[id]
         if (existing) {
             return existing
         }
-        TaskSpecification newTask = new TaskSpecification(id: id)
-        taskSpecifications << newTask
-        return newTask
+        TaskSpecification task = new TaskSpecification(id: id)
+        taskSpecIndex[id] = task
+        taskSpecifications << task
+        return task
     }
 
     TaskExecution touchTaskExecution(String id) {
-        TaskExecution existing = taskExecutions.find { spec -> spec.id == id }
+        TaskExecution existing = taskExecIndex[id]
         if (existing) {
             return existing
         }
-        TaskExecution newTask = new TaskExecution(id: id)
-        taskExecutions << newTask
-        return newTask
+        TaskExecution task = new TaskExecution(id: id)
+        taskExecIndex[id] = task
+        taskExecutions << task
+        return task
     }
 
-    void update_children_and_parents() {
-        // reset parents/children first
-        taskSpecifications.each { t ->
-            t.parents = [] as String[]
-            t.children = [] as String[]
-        }
-        // build a map: file -> producers (tasks that list it in outputFiles)
-        Map<String, List<TaskSpecification>> producers = [:]
+    // Work out parents/children from the files: A is a parent of B when an
+    // output file of A shows up as an input file of B.
+    void inferDataDependencies() {
+        Map<String, List<String>> producers = [:].withDefault { [] }
         taskSpecifications.each { task ->
-            (task.outputFiles ?: []).each { f ->
-                if (!f) return
-                if (!producers.containsKey(f)) producers[f] = []
-                producers[f] << task
-            }
-        }
-        // build a map: file -> consumers (tasks that list it in inputFiles)
-        Map<String, List<TaskSpecification>> consumers = [:]
-        taskSpecifications.each { task ->
-            (task.inputFiles ?: []).each { f ->
-                if (!f) return
-                if (!consumers.containsKey(f)) consumers[f] = []
-                consumers[f] << task
-            }
-        }
-        // infer parents (producers of my inputs) and children (consumers of my outputs)
-        taskSpecifications.each { task ->
-            Set<String> parentsSet = [] as Set
-            Set<String> childrenSet = [] as Set
-            (task.inputFiles ?: []).each { f ->
-                def ps = producers[f]
-                if (ps) {
-                    ps.each { p ->
-                        if (p?.id && p.id != task.id) parentsSet << p.id
-                    }
+            (task.outputFiles ?: []).each { file ->
+                if (file) {
+                    producers[file] << task.id
                 }
             }
-            (task.outputFiles ?: []).each { f ->
-                def cs = consumers[f]
-                if (cs) {
-                    cs.each { c ->
-                        if (c?.id && c.id != task.id) childrenSet << c.id
-                    }
-                }
-            }
-            task.parents = parentsSet.toArray(new String[0])
-            task.children = childrenSet.toArray(new String[0])
         }
-        // enforce symmetry: if A lists B as child, make sure B lists A as parent (and vice versa)
+
+        Map<String, Set<String>> parentsOf = [:].withDefault { [] as Set }
+        Map<String, Set<String>> childrenOf = [:].withDefault { [] as Set }
         taskSpecifications.each { task ->
-            (task.children ?: []).each { cid ->
-                def child = taskSpecifications.find { it.id == cid }
-                if (child) {
-                    def pset = (child.parents ?: []) as List
-                    if (!pset.contains(task.id)) {
-                        pset << task.id
-                        child.parents = (pset as Set).toArray(new String[0])
-                    }
-                }
-            }
-            (task.parents ?: []).each { pid ->
-                def parent = taskSpecifications.find { it.id == pid }
-                if (parent) {
-                    def cset = (parent.children ?: []) as List
-                    if (!cset.contains(task.id)) {
-                        cset << task.id
-                        parent.children = (cset as Set).toArray(new String[0])
+            (task.inputFiles ?: []).each { file ->
+                producers[file].each { producerId ->
+                    if (producerId != task.id) {
+                        parentsOf[task.id] << producerId
+                        childrenOf[producerId] << task.id
                     }
                 }
             }
         }
+
+        taskSpecifications.each { task ->
+            task.parents = (parentsOf[task.id] as List<String>).sort()
+            task.children = (childrenOf[task.id] as List<String>).sort()
+        }
+    }
+
+    // Just the process name, without the qualified prefix or the (sample) suffix.
+    static String shortName(String fullName) {
+        if (!fullName) {
+            return ''
+        }
+        String base = fullName.replaceAll(/\s*\(.*\)\s*$/, '')
+        int idx = base.lastIndexOf(':')
+        return idx >= 0 ? base.substring(idx + 1) : base
+    }
+
+    // The graph so far as a DOT document: a node per task, edges from the file
+    // dependencies, one fill colour per process.
+    String renderPhysicalDot() {
+        inferDataDependencies()
+
+        List<String> palette = [
+            '#8dd3c7', '#ffffb3', '#bebada', '#fb8072', '#80b1d3', '#fdb462',
+            '#b3de69', '#fccde5', '#d9d9d9', '#bc80bd', '#ccebc5', '#ffed6f',
+        ]
+        Map<String, String> colourOf = [:]
+        int next = 0
+
+        StringBuilder sb = new StringBuilder()
+        sb << 'digraph physical {\n'
+        sb << '  rankdir=TB;\n'
+        sb << '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10];\n'
+        sb << '  edge [color="#666666"];\n'
+
+        taskSpecifications.each { task ->
+            String proc = shortName(task.name) ?: 'task'
+            String colour = colourOf[proc]
+            if (!colour) {
+                colour = palette[next % palette.size()]
+                colourOf[proc] = colour
+                next++
+            }
+            String label = "${proc}\\n[${task.id}]"
+            sb << "  \"t${task.id}\" [label=\"${dotEscape(label)}\", fillcolor=\"${colour}\"];\n"
+        }
+
+        taskSpecifications.each { task ->
+            (task.children ?: []).each { child ->
+                sb << "  \"t${task.id}\" -> \"t${child}\";\n"
+            }
+        }
+
+        sb << '}\n'
+        return sb.toString()
+    }
+
+    private static String dotEscape(String value) {
+        return value.replace('\\', '\\\\').replace('"', '\\"')
     }
 
     Map toMap() {
-        update_children_and_parents()
+        inferDataDependencies()
         return [
-            name : name,
-            description : description,
-            createdAt : createdAt,
+            name          : name,
+            description   : description,
+            createdAt     : createdAt,
             schemaVersion : schemaVersion,
-            author : [
-                name : '',
-                email : '',
+            author        : [
+                name        : '',
+                email       : '',
                 institution : '',
-                country : ''
+                country     : '',
             ],
-            runtimeSystem: [
-                name : runtimeSystemName,
-                url : runtimeSystemUrl,
-                version : runtimeSystemVersion
+            runtimeSystem : [
+                name    : runtimeSystemName,
+                url     : runtimeSystemUrl,
+                version : runtimeSystemVersion,
             ],
-            workflow: [
+            workflow      : [
                 specification : [
                     tasks : taskSpecifications*.toMap(),
-                    files : fileSpecifications*.toMap()
+                    files : fileSpecifications*.toMap(),
                 ],
-                execution : [
+                execution     : [
                     makespanInSeconds : makespanInSeconds,
-                    executedAt : executedAt,
-                    tasks : taskExecutions*.toMap(),
-                    machines : machineSpecifications*.toMap()
-                ]
-            ]
+                    executedAt        : executedAt,
+                    tasks             : taskExecutions*.toMap(),
+                    machines          : machineSpecifications*.toMap(),
+                ],
+            ],
         ]
     }
 

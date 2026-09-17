@@ -1,118 +1,69 @@
 #!/usr/bin/env bash
 # ==============================================
-# Tools Script
-# Available commands:
-#   nf-setup - Install reference nextflow version (25.04.2), patch jar
-#   install  - Build and install plugin (runs `make install` in script dir)
-#   test     - Run test (cd into ./test and run nextflow...; output -> cmdout.log)
-#   clean    - Clean test artifacts (delete everything in ./test except nextflow.config)
+# nf-bigbrother helper script
+#
+#   nf-setup - Install the reference Nextflow version (25.04.2) and patch it
+#              so tasks emit machine info + extra resource counters
+#   install  - Build the plugin and install it into ~/.nextflow/plugins
+#   test     - Run the container-free example pipeline and render its graph
+#   clean    - Remove generated run artifacts from the example directory
 # ==============================================
 
 set -euo pipefail
 
-# Resolve the directory this script lives in (works even when sourced via symlink)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_DIR="$SCRIPT_DIR/test"
-KEEP_FILE="nextflow.config"
+EXAMPLE_DIR="$SCRIPT_DIR/examples/local-pipeline"
 
 show_usage() {
-    echo "Usage: $(basename "$0") <command>"
-    echo
-    echo "Available commands:"
-    echo "  nf-setup - Install reference nextflow version (25.04.2), patch jar"
-    echo "  install  - Build and install plugin (runs 'make install' in the script directory)"
-    echo "  test     - Run tests (changes directory into './test' relative to the script and runs Nextflow)"
-    echo "  clean    - Remove everything in './test' except the file '$KEEP_FILE'"
+    echo "Usage: $(basename "$0") <nf-setup|install|test|clean>"
 }
 
 CMD="${1:-}"
-
-if [ -z "$CMD" ]; then
-    show_usage
-    exit 1
-fi
+[ -z "$CMD" ] && { show_usage; exit 1; }
 
 case "$CMD" in
     nf-setup)
         NEXTFLOW_VERSION="${NXF_VER:-25.04.2}"
         echo "==> Installing Nextflow v$NEXTFLOW_VERSION"
-
-        if ! command -v curl >/dev/null 2>&1; then
-            echo "Error: curl is required to run the official installer. Install curl and retry." >&2
-            exit 11
-        fi
-
-        (
-            echo "==> Running official installer (get.nextflow.io) with NXF_VER=$NEXTFLOW_VERSION"
-            NXF_VER="$NEXTFLOW_VERSION" curl -fsSL https://get.nextflow.io | bash || {
-                rc=$?; echo "Installer failed with exit code $rc" >&2; exit $rc
-            }
-        )
+        command -v curl >/dev/null 2>&1 || { echo "Error: curl is required" >&2; exit 11; }
+        NXF_VER="$NEXTFLOW_VERSION" curl -fsSL https://get.nextflow.io | bash
 
         PATCH_SCRIPT="$SCRIPT_DIR/patch/patch-nextflow.sh"
-        if [ -x "$PATCH_SCRIPT" ]; then
-            echo "==> Running patch script: $PATCH_SCRIPT"
-            "$PATCH_SCRIPT"
-            echo "==> Patch script completed."
-        elif [ -f "$PATCH_SCRIPT" ]; then
-            echo "==> Found patch script but not executable; running via bash:"
+        if [ -f "$PATCH_SCRIPT" ]; then
+            echo "==> Applying command-wrapper patch"
             bash "$PATCH_SCRIPT"
-            echo "==> Patch script completed."
         else
-            echo "==> No patch script found at: $PATCH_SCRIPT (skipping patch step)"
+            echo "==> No patch script at $PATCH_SCRIPT (skipping)"
         fi
-
-        echo
-        echo "==> Nextflow v$NEXTFLOW_VERSION installed"
-        echo
-        echo "Note: the installer uses NXF_VER to pick the version. You can also set NXF_VER in your environment"
+        echo "==> Nextflow v$NEXTFLOW_VERSION installed and patched"
         ;;
+
     install)
-        echo "==> Running 'make install' in script directory: $SCRIPT_DIR"
+        echo "==> make install"
         ( cd "$SCRIPT_DIR" && make install )
-        echo "==> make install finished."
         ;;
+
     test)
-        if [ ! -d "$TEST_DIR" ]; then
-            echo "Error: test directory does not exist: $TEST_DIR" >&2
-            exit 2
-        fi
-
-        echo "==> Running Nextflow in: $TEST_DIR"
+        [ -d "$EXAMPLE_DIR" ] || { echo "Error: missing $EXAMPLE_DIR" >&2; exit 2; }
+        echo "==> Running example pipeline in $EXAMPLE_DIR"
         (
-            cd "$TEST_DIR" || { echo "Failed to cd to $TEST_DIR" >&2; exit 3; }
-            nextflow run nextflow-io/rnaseq-nf -with-docker | tee cmdout.log
-            nf_status=${PIPESTATUS[0]:-0}
-            echo "==> nextflow exit status: $nf_status"
-            exit "$nf_status"
+            cd "$EXAMPLE_DIR"
+            nextflow run main.nf -ansi-log false
+            complete=$(ls bb_out/complete_*.json 2>/dev/null | head -1 || true)
+            if [ -n "$complete" ] && command -v dot >/dev/null 2>&1; then
+                echo "==> Rendering physical graph"
+                "$SCRIPT_DIR/tools/bb_dag.py" "$complete" -f png --metrics -o physical-graph.png
+            fi
         )
-        exit_status=$?
-        if [ $exit_status -ne 0 ]; then
-            echo "==> Test command failed with status $exit_status" >&2
-            exit $exit_status
-        fi
-        echo "==> Test command completed successfully."
         ;;
+
     clean)
-        if [ ! -d "$TEST_DIR" ]; then
-            echo "Warning: test directory does not exist: $TEST_DIR (nothing to clean)"
-            exit 0
-        fi
-        case "$TEST_DIR" in
-            "$SCRIPT_DIR"/* | "$SCRIPT_DIR")
-                # OK
-                ;;
-            *)
-                echo "Refusing to operate: test dir ($TEST_DIR) is not inside script dir ($SCRIPT_DIR)." >&2
-                exit 4
-                ;;
-        esac
-
-        echo "==> Cleaning test directory: $TEST_DIR"
-        find "$TEST_DIR" -mindepth 1 ! -path "$TEST_DIR/$KEEP_FILE" -exec rm -rf {} + || true
-
-        echo "==> Clean complete. Preserved (if present): $TEST_DIR/$KEEP_FILE"
+        [ -d "$EXAMPLE_DIR" ] || exit 0
+        echo "==> Cleaning run artifacts in $EXAMPLE_DIR"
+        ( cd "$EXAMPLE_DIR" && rm -rf bb_out work results .nextflow* *.dot *.svg *.png )
+        echo "==> Done (pipeline source preserved)"
         ;;
+
     *)
         echo "Unknown command: $CMD" >&2
         show_usage

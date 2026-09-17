@@ -4,7 +4,6 @@ set -euo pipefail
 
 NXF_JAR="${NXF_JAR:-$HOME/.nextflow/framework/25.04.2/nextflow-25.04.2-one.jar}"
 REPLACEMENT_COMMAND_TRACE="$(cd -- "$(dirname -- "$0")" && pwd)/custom-command-trace.txt"
-REPLACEMENT_COMMAND_RUN="$(cd -- "$(dirname -- "$0")" && pwd)/custom-command-run.txt"
 
 BACKUP_JAR="${NXF_JAR}.bak"
 
@@ -21,10 +20,9 @@ trap 'rm -rf "$TMPDIR"' EXIT
 unzip -q "$NXF_JAR" -d "$TMPDIR"
 
 cp "$REPLACEMENT_COMMAND_TRACE" "$TMPDIR/nextflow/executor/command-trace.txt"
-cp "$REPLACEMENT_COMMAND_RUN" "$TMPDIR/nextflow/executor/command-run.txt"
 
 pushd "$TMPDIR" > /dev/null
 zip -qr "$NXF_JAR" .
 popd > /dev/null
 
-echo "Patched $NXF_JAR with new command-trace.txt and command-run.txt"
+echo "Patched $NXF_JAR with new command-trace.txt"
