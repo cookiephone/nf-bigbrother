@@ -123,3 +123,14 @@ version. It is entirely optional; the plugin degrades gracefully without it.
 ## License
 
 Apache License 2.0. See the [`COPYING`](COPYING) file.
+
+If you are publishing a paper and use this plugin, please consider citing our publication:
+
+```bibtex
+@article{kharma2026comprehensive,
+  title={Comprehensive Plugin-Based Monitoring of Nexflow Workflow Executions},
+  author={Kharma, Sami and Wies, Tobias and Schintke, Florian},
+  journal={arXiv preprint arXiv:2603.28783},
+  year={2026}
+}
+```
