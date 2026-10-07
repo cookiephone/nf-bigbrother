@@ -4,6 +4,7 @@
 .settings
 
 build
+/bin/
 work
 out
 .nextflow*

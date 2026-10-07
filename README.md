@@ -29,11 +29,13 @@ reads, A is a parent of B.
 
 ## Get Started
 
-Requires Nextflow 25.10 or newer. Enable the plugin in your `nextflow.config`:
+Requires Nextflow 25.10 or newer.
+
+In a pipeline you own, enable the plugin from its `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-bigbrother@1.0.0'
+    id 'nf-bigbrother@1.0.1'
 }
 
 bigbrother {
@@ -43,6 +45,41 @@ bigbrother {
     prefix       = ''
 }
 ```
+
+### Observing a Pipeline You Don't Own
+
+For a pipeline you only run — an nf-core workflow, say — enable the plugin with
+`NXF_PLUGINS_DEFAULT` rather than a `plugins` block:
+
+```bash
+NXF_PLUGINS_DEFAULT=nf-bigbrother@1.0.1 \
+  nextflow run nf-core/demo -r 1.2.0 -profile test,docker --outdir results
+```
+
+Do **not** reach for `-plugins nf-bigbrother@1.0.1`, and do not put a `plugins`
+block in a `-c` config. Both *replace* the pipeline's own `plugins` declaration
+rather than adding to it, which silently unpins whatever the pipeline depends
+on. nf-core/demo 1.2.0 pins `nf-schema@2.7.2`; unpinned, Nextflow 26.04 resolves
+it to `nf-schema@3.0.0`, whose changed `paramsSummaryLog` signature aborts the
+run before a single task starts:
+
+```
+Missing process or function paramsSummaryLog(...)
+```
+
+`NXF_PLUGINS_DEFAULT` feeds a separate list that is merged with the pipeline's,
+so the pins survive. If you do need the plugin declared in config, restate the
+pipeline's own plugins alongside it in a single block:
+
+```groovy
+plugins {
+    id 'nf-schema@2.7.2'      // whatever the pipeline already pinned
+    id 'nf-bigbrother@1.0.1'
+}
+```
+
+The `bigbrother` settings above work the same way in a `-c` config file; only
+the `plugins` block has this replace-not-merge behaviour.
 
 A run then fills `outputDir` with `partial_000_<name>_<uuid>.json` / `.dot`
 (one per completed task), a final `complete_<name>_<uuid>.*`, and an `error_*`
@@ -87,7 +124,8 @@ nextflow run main.nf
 The workflow used as the real reference is nf-core/rnaseq on the test profile:
 
 ```bash
-nextflow run nf-core/rnaseq -r 3.21.0 -profile test,docker --outdir results
+NXF_PLUGINS_DEFAULT=nf-bigbrother@1.0.1 \
+  nextflow run nf-core/rnaseq -r 3.21.0 -profile test,docker --outdir results
 ```
 
 ## Plugin Development
