@@ -14,18 +14,28 @@ process, with each snapshot's newest tasks and edges highlighted.*
 
 Nextflow's own `-with-dag` gives you the abstract process/channel graph that's
 known before anything runs. `nf-bigbrother` records the graph of what actually
-ran. After each task it writes a JSON snapshot and a matching Graphviz `.dot`,
-so the graph is available at every point during the run, not just at the end.
+ran. It appends one JSON line per task to an event log as the run proceeds, and
+writes a full JSON snapshot plus a matching Graphviz `.dot` at the end, so the
+graph is available at every point during the run and not just when it finishes.
 
-Each JSON snapshot follows a WfCommons-style layout (schemaVersion 1.5):
+The final snapshot follows a WfCommons-style layout (schemaVersion 1.5):
 
 - `workflow.specification` holds the tasks (id, name, parents/children,
   input/output files) and the files with their sizes.
-- `workflow.execution` holds per-task runtime, CPU, I/O and memory counters
-  plus the machines the tasks ran on.
+- `workflow.execution` holds per-task runtime, CPU, I/O and memory counters,
+  what each task requested of the scheduler, and the machines they ran on.
 
 Parents and children come from the files: if task A writes a file that task B
 reads, A is a parent of B.
+
+The event log (`events_*.jsonl`) carries the same information incrementally —
+a `run` header, one `task` line each time a task finishes, and a terminal
+`complete` (or `error`) line with the file table and makespan. Replaying its
+first *N* task lines reconstructs the graph as it stood after *N* tasks, which
+is what the bundled tools use to render a run as it goes. It is the cheap path:
+a full snapshot re-serialises the entire graph, so writing one per task costs
+time and space quadratic in the task count, while the log costs one line per
+task. That is why snapshots-during-the-run are off by default.
 
 ## Get Started
 
@@ -40,11 +50,19 @@ plugins {
 
 bigbrother {
     outputDir    = 'bigbrother'   // defaults shown
-    emitPartials = true           // write a snapshot after every task
-    emitDot      = true           // also write a .dot next to each json
+    emitEvents   = true           // append a JSON line per task to events_*.jsonl
+    emitPartials = false          // also write a whole-graph snapshot during the run
+    snapshotEvery = 1             // ...every N tasks, when emitPartials is on
+    emitDot      = true           // write a .dot beside every json snapshot
     prefix       = ''
 }
 ```
+
+`emitPartials` defaulted to `true` up to 1.0.1, which wrote a
+`partial_NNN_*.json` after every task. The event log supersedes it — same
+information, one line per task instead of a full rewrite — so it now defaults
+to `false`. Turn it back on if you have tooling that reads the partial files,
+and consider `snapshotEvery` to thin them out on a large run.
 
 ### Observing a Pipeline You Don't Own
 
@@ -81,9 +99,10 @@ plugins {
 The `bigbrother` settings above work the same way in a `-c` config file; only
 the `plugins` block has this replace-not-merge behaviour.
 
-A run then fills `outputDir` with `partial_000_<name>_<uuid>.json` / `.dot`
-(one per completed task), a final `complete_<name>_<uuid>.*`, and an `error_*`
-snapshot instead if it dies partway.
+A run then fills `outputDir` with `events_<name>_<uuid>.jsonl` (appended to as
+it goes), a final `complete_<name>_<uuid>.json` / `.dot`, and an `error_*`
+snapshot instead if it dies partway. With `emitPartials` on you also get
+`partial_NNN_<name>_<uuid>.json` / `.dot`.
 
 The `machines` list — the hardware description of the nodes tasks ran on —
 needs an optional patch to Nextflow's task wrapper (see
@@ -120,24 +139,28 @@ identify a node today.
 
 ## Examples
 
-Running any pipeline with the plugin enabled produces the snapshots described
-above. Every snapshot already has a plain `.dot` beside it; the bundled Python
-tools turn them into something nicer.
+Running any pipeline with the plugin enabled produces the output described
+above. The final snapshot already has a plain `.dot` beside it; the bundled
+Python tools turn either the snapshot or the event log into something nicer.
 
-`tools/bb_dag.py` renders a snapshot (grouping by process, colour, node
-metrics). It uses only the standard library, plus the `dot` binary for images:
+`tools/bb_dag.py` renders a graph (grouping by process, colour, node metrics).
+It uses only the standard library, plus the `dot` binary for images:
 
 ```bash
 tools/bb_dag.py bigbrother/complete_*.json -f svg --metrics -o graph.svg
+tools/bb_dag.py bigbrother/events_*.jsonl -f svg -o graph.svg   # same graph
 tools/bb_dag.py --watch bigbrother -f svg -o live.svg   # re-render as a run goes
 ```
 
-`tools/bb_animate.py` turns the whole sequence of snapshots into the kind of
-animation shown at the top of this page:
+`tools/bb_animate.py` replays a run into the kind of animation shown at the top
+of this page, one frame per task:
 
 ```bash
 tools/bb_animate.py bigbrother -o dag-build.gif --fps 14
 ```
+
+It reads the event log by preference and falls back to `partial_*` snapshots,
+so runs recorded either way animate the same.
 
 There is a small container-free pipeline under `examples/local-pipeline` (a
 shared reference, a fan-out over samples, glob and directory outputs, a fan-in)

@@ -3,12 +3,14 @@ package nextflow.bigbrother
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
 import java.time.Duration
 import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
+import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
@@ -45,6 +47,8 @@ class BigBrotherObserver implements TraceObserverV2 {
     private String safeName
     private ZonedDateTime startTime
     private int snapshotCounter = 0
+    private int completedCount = 0
+    private Path eventLog
 
     @Override
     void onFlowCreate(Session session) {
@@ -68,6 +72,11 @@ class BigBrotherObserver implements TraceObserverV2 {
         wf.runtimeSystemUrl = 'https://www.nextflow.io/'
         wf.runtimeSystemVersion = session.workflowMetadata?.nextflow?.version?.toString() ?: ''
 
+        if (config.emitEvents) {
+            this.eventLog = outputDir.resolve("${baseName('events')}.jsonl")
+            appendEvent(wf.runEventMap())
+        }
+
         log.info "[BigBrother] monitoring run '${projectName}' -> ${outputDir}"
     }
 
@@ -89,35 +98,52 @@ class BigBrotherObserver implements TraceObserverV2 {
         if (task == null) {
             return
         }
+        // Walking the filesystem and stat-ing files happens before the lock is
+        // taken: it is the slow part, it needs nothing from the model, and
+        // holding the lock across it would serialise every concurrent task.
+        final String id = task.id.toString()
+        final List<String> inputs = collectInputFiles(task)
+        final Map<String, Long> sizes = statFiles(inputs)
         synchronized (lock) {
-            final TaskSpecification spec = wf.touchTaskSpecification(task.id.toString())
+            final TaskSpecification spec = wf.touchTaskSpecification(id)
             spec.name = task.name
-            spec.inputFiles = collectInputFiles(task)
-            registerFiles(spec.inputFiles)
+            spec.inputFiles = inputs
+            registerFiles(inputs, sizes)
+            wf.linkTask(id, inputs, null)
         }
     }
 
     @Override
     void onTaskComplete(TaskEvent event) {
         final TaskRun task = event?.handler?.task
-        if (task == null) {
-            return
-        }
-        synchronized (lock) {
-            recordTask(task, event.trace)
-            writeSnapshot()
+        if (task != null) {
+            recordAndEmit(task, event.trace)
         }
     }
 
     @Override
     void onTaskCached(TaskEvent event) {
         final TaskRun task = event?.handler?.task
-        if (task == null) {
-            return
+        if (task != null) {
+            recordAndEmit(task, event.trace)
         }
+    }
+
+    // Collect a finished task's files off the lock, then take the lock just long
+    // enough to fold it into the model and write it out.
+    private void recordAndEmit(TaskRun task, TraceRecord trace) {
+        final List<String> inputs = collectInputFiles(task)
+        final List<String> outputs = collectOutputFiles(task)
+        final Map<String, Long> sizes = statFiles(inputs, outputs)
         synchronized (lock) {
-            recordTask(task, event.trace)
-            writeSnapshot()
+            recordTask(task, trace, inputs, outputs, sizes)
+            completedCount++
+            if (config.emitEvents) {
+                appendEvent(wf.taskEventMap(task.id.toString()))
+            }
+            if (config.emitPartials && completedCount % config.snapshotEvery == 0) {
+                writeSnapshot()
+            }
         }
     }
 
@@ -126,18 +152,30 @@ class BigBrotherObserver implements TraceObserverV2 {
         synchronized (lock) {
             wf.makespanInSeconds = Duration.between(startTime, ZonedDateTime.now(ZoneOffset.UTC)).seconds.toString()
             writeInstance('complete')
+            if (config.emitEvents) {
+                appendEvent(wf.endEventMap('complete'))
+            }
             log.info "[BigBrother] run complete: ${wf.taskSpecifications.size()} tasks recorded in ${outputDir}"
         }
     }
 
     @Override
     void onFlowError(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        final List<String> inputs = task != null ? collectInputFiles(task) : null
+        final List<String> outputs = task != null ? collectOutputFiles(task) : null
+        final Map<String, Long> sizes = task != null ? statFiles(inputs, outputs) : null
         synchronized (lock) {
-            final TaskRun task = event?.handler?.task
             if (task != null) {
-                recordTask(task, event.trace)
+                recordTask(task, event.trace, inputs, outputs, sizes)
+                if (config.emitEvents) {
+                    appendEvent(wf.taskEventMap(task.id.toString()))
+                }
             }
             writeInstance('error')
+            if (config.emitEvents) {
+                appendEvent(wf.endEventMap('error'))
+            }
             log.warn '[BigBrother] run failed; error snapshot written'
         }
     }
@@ -147,18 +185,21 @@ class BigBrotherObserver implements TraceObserverV2 {
 
     // --- helpers ---
 
-    // Record a task's files, resource metrics and machine.
-    private void recordTask(TaskRun task, TraceRecord trace) {
+    // Fold a task's files, resource metrics and machine into the model. The
+    // caller has already done the filesystem work, off the lock.
+    private void recordTask(TaskRun task, TraceRecord trace, List<String> inputs,
+                            List<String> outputs, Map<String, Long> sizes) {
         final String id = task.id.toString()
 
         final TaskSpecification spec = wf.touchTaskSpecification(id)
         if (!spec.name) {
             spec.name = task.name
         }
-        spec.inputFiles = collectInputFiles(task)
-        spec.outputFiles = collectOutputFiles(task)
-        registerFiles(spec.inputFiles)
-        registerFiles(spec.outputFiles)
+        spec.inputFiles = inputs
+        spec.outputFiles = outputs
+        registerFiles(inputs, sizes)
+        registerFiles(outputs, sizes)
+        wf.linkTask(id, inputs, outputs)
 
         final TaskExecution exec = wf.touchTaskExecution(id)
         exec.pendingAt = pendingAt[id] ?: ''
@@ -293,15 +334,30 @@ class BigBrotherObserver implements TraceObserverV2 {
         return result.unique()
     }
 
-    private void registerFiles(List<String> files) {
-        files.each { file ->
-            long size = -1L
-            try {
-                size = Files.size(Paths.get(file))
+    // Stat a run's worth of files. Called before the lock is taken, since this
+    // touches the filesystem once per file and the model is not involved.
+    private static Map<String, Long> statFiles(List<String> first, List<String> second = null) {
+        final Map<String, Long> sizes = new HashMap<>()
+        [first, second].each { group ->
+            group?.each { file ->
+                if (file == null || sizes.containsKey(file)) {
+                    return
+                }
+                long size = -1L
+                try {
+                    size = Files.size(Paths.get(file))
+                }
+                catch (Exception ignored) {
+                }
+                sizes.put(file, size)
             }
-            catch (Exception ignored) {
-            }
-            wf.touchFileSpecification(file, size)
+        }
+        return sizes
+    }
+
+    private void registerFiles(List<String> files, Map<String, Long> sizes) {
+        files?.each { file ->
+            wf.touchFileSpecification(file, sizes.containsKey(file) ? sizes.get(file) : -1L)
         }
     }
 
@@ -391,19 +447,35 @@ class BigBrotherObserver implements TraceObserverV2 {
         return Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
     }
 
-    // --- writing snapshots ---
+    // --- writing output ---
 
-    private void writeSnapshot() {
-        if (!config.emitPartials) {
+    // Append one JSON object as a single line. Done under the same lock as the
+    // model update so lines land in the order tasks finished.
+    private void appendEvent(Map event) {
+        if (eventLog == null) {
             return
         }
+        try {
+            final String line = JsonOutput.toJson(event) + '\n'
+            Files.write(eventLog, line.getBytes('UTF-8'), StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+        }
+        catch (Exception e) {
+            log.warn "[BigBrother] failed to append to ${eventLog}: ${e.message}"
+        }
+    }
+
+    private String baseName(String phase) {
+        return config.prefix ? "${config.prefix}_${phase}_${safeName}_${session.uniqueId}"
+            : "${phase}_${safeName}_${session.uniqueId}"
+    }
+
+    private void writeSnapshot() {
         writeInstance("partial_${snapshotCounter.toString().padLeft(3, '0')}")
         snapshotCounter++
     }
 
     private void writeInstance(String phase) {
-        final String base = config.prefix ? "${config.prefix}_${phase}_${safeName}_${session.uniqueId}"
-            : "${phase}_${safeName}_${session.uniqueId}"
+        final String base = baseName(phase)
         try {
             Files.write(outputDir.resolve("${base}.json"), wf.toJson().getBytes('UTF-8'))
             if (config.emitDot) {

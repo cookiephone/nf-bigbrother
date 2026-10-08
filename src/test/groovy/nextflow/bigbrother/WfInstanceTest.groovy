@@ -84,6 +84,124 @@ class WfInstanceTest extends Specification {
         dot.contains('"t1" -> "t2"')
     }
 
+    def 'linkTask builds the same edges incrementally as a full rebuild'() {
+        given: 'the validation pipeline shape -- seed fans out, aligns fan in'
+        def incremental = new WfInstance()
+        def rebuilt = new WfInstance()
+
+        when: 'one instance is linked task by task, as a run would'
+        [incremental, rebuilt].each { wf ->
+            wf.touchTaskSpecification('1').outputFiles = ['/ref']
+            ['2', '3', '4'].each { id ->
+                def s = wf.touchTaskSpecification(id)
+                s.inputFiles = ['/ref']
+                s.outputFiles = ["/out-${id}".toString()]
+            }
+            wf.touchTaskSpecification('5').inputFiles = ['/out-2', '/out-3', '/out-4']
+        }
+        incremental.taskSpecifications.each { incremental.linkTask(it.id, it.inputFiles, it.outputFiles) }
+        incremental.materializeEdges()
+        rebuilt.inferDataDependencies()
+
+        then: 'both agree, edge for edge'
+        incremental.taskSpecifications.collect { [it.id, it.parents, it.children] } ==
+            rebuilt.taskSpecifications.collect { [it.id, it.parents, it.children] }
+
+        and:
+        incremental.taskSpecifications.find { it.id == '1' }.children == ['2', '3', '4']
+        incremental.taskSpecifications.find { it.id == '5' }.parents == ['2', '3', '4']
+    }
+
+    def 'linkTask links a consumer registered before its producer'() {
+        given: 'inputs are registered at submit, outputs only at completion'
+        def wf = new WfInstance()
+        wf.touchTaskSpecification('2').inputFiles = ['/f']
+        wf.touchTaskSpecification('1').outputFiles = ['/f']
+
+        when: 'the consumer is linked first'
+        wf.linkTask('2', ['/f'], null)
+        wf.linkTask('1', null, ['/f'])
+        wf.materializeEdges()
+
+        then: 'the edge still appears'
+        wf.taskSpecifications.find { it.id == '1' }.children == ['2']
+        wf.taskSpecifications.find { it.id == '2' }.parents == ['1']
+    }
+
+    def 'linking a task twice does not duplicate its edges'() {
+        given: 'onTaskSubmit then onTaskComplete both register the same inputs'
+        def wf = new WfInstance()
+        wf.touchTaskSpecification('1').outputFiles = ['/f']
+        wf.touchTaskSpecification('2').inputFiles = ['/f']
+
+        when:
+        wf.linkTask('1', null, ['/f'])
+        wf.linkTask('2', ['/f'], null)
+        wf.linkTask('2', ['/f'], null)
+        wf.materializeEdges()
+
+        then:
+        wf.taskSpecifications.find { it.id == '2' }.parents == ['1']
+        wf.taskSpecifications.find { it.id == '1' }.children == ['2']
+    }
+
+    def 'linkTask never makes a task its own parent'() {
+        given:
+        def wf = new WfInstance()
+        wf.touchTaskSpecification('1')
+
+        when: 'a task consumes a file it also produces'
+        wf.linkTask('1', ['/shared'], ['/shared'])
+        wf.materializeEdges()
+
+        then:
+        wf.taskSpecifications[0].parents == []
+        wf.taskSpecifications[0].children == []
+    }
+
+    def 'a task event carries its own record, with parents but not children'() {
+        given:
+        def wf = new WfInstance()
+        wf.touchTaskSpecification('1').outputFiles = ['/f']
+        def b = wf.touchTaskSpecification('2')
+        b.name = 'P:B (s1)'
+        b.inputFiles = ['/f']
+        wf.touchTaskExecution('2').runtimeInSeconds = 1.5f
+        wf.linkTask('1', null, ['/f'])
+        wf.linkTask('2', ['/f'], null)
+
+        when:
+        def event = wf.taskEventMap('2')
+
+        then:
+        event.event == 'task'
+        event.id == '2'
+        event.name == 'P:B (s1)'
+        event.parents == ['1']
+        event.inputFiles == ['/f']
+        event.execution.runtimeInSeconds == 1.5f
+
+        and: 'children are omitted -- they are not knowable when a task finishes'
+        !event.containsKey('children')
+    }
+
+    def 'the terminal event carries the file table and the makespan'() {
+        given:
+        def wf = new WfInstance()
+        wf.makespanInSeconds = '42'
+        wf.touchTaskSpecification('1')
+        wf.touchFileSpecification('/f', 123L)
+
+        when:
+        def event = wf.endEventMap('complete')
+
+        then:
+        event.event == 'complete'
+        event.makespanInSeconds == '42'
+        event.taskCount == 1
+        event.files == [[id: '/f', sizeInBytes: 123L]]
+    }
+
     def 'task execution keeps the base WfFormat fields at the top level'() {
         given:
         def exec = new TaskExecution(id: '1', runtimeInSeconds: 2.5f, memoryInBytes: 1024L, peakRss: 2048L)

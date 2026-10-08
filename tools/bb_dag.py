@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Draw the physical execution graph from a BigBrother snapshot.
+"""Draw the physical execution graph from a BigBrother snapshot or event log.
 
-Takes one of the JSON snapshots the plugin writes and produces a Graphviz DOT
-graph (one node per task, edges from the file dependencies), rendering it to
-SVG/PNG/PDF if the `dot` binary is around. --watch keeps re-rendering the newest
-snapshot in a directory, which is handy while a run is going.
+Takes either a JSON snapshot or an `events_*.jsonl` event log and produces a
+Graphviz DOT graph (one node per task, edges from the file dependencies),
+rendering it to SVG/PNG/PDF if the `dot` binary is around. --watch keeps
+re-rendering the newest output in a directory, which is handy while a run is
+going -- the event log is appended to after every task, so it stays current.
 
     bb_dag.py bb_out/complete_*.json                  # dot to stdout
+    bb_dag.py bb_out/events_*.jsonl -f svg -o graph.svg
     bb_dag.py snap.json -f svg --metrics -o graph.svg
     bb_dag.py --watch bb_out -f svg -o live.svg
 """
@@ -54,6 +56,102 @@ def human_bytes(n: int) -> str:
     return f"{value:.1f}PB"
 
 
+def infer_edges(tasks: dict) -> None:
+    """Fill in parents/children from the file lists, as the plugin does.
+
+    A is a parent of B when an output file of A is an input file of B. Needed
+    when replaying an event log, whose task lines carry the files but not the
+    children -- a task's children are not known at the moment it finishes.
+    """
+    producers: dict[str, list[str]] = {}
+    for tid, task in tasks.items():
+        for path in task.get("outputFiles") or []:
+            producers.setdefault(path, []).append(tid)
+
+    parents: dict[str, set] = {tid: set() for tid in tasks}
+    children: dict[str, set] = {tid: set() for tid in tasks}
+    for tid, task in tasks.items():
+        for path in task.get("inputFiles") or []:
+            for producer in producers.get(path, ()):
+                if producer != tid:
+                    parents[tid].add(producer)
+                    children[producer].add(tid)
+
+    for tid, task in tasks.items():
+        task["parents"] = sorted(parents[tid])
+        task["children"] = sorted(children[tid])
+
+
+def count_task_events(path: str) -> int:
+    """How many task lines an event log holds, i.e. how many frames it can make."""
+    total = 0
+    with open(path) as fh:
+        for line in fh:
+            if '"event":"task"' in line or '"event": "task"' in line:
+                total += 1
+    return total
+
+
+def replay_events(path: str, upto: int | None = None) -> dict:
+    """Replay an events_*.jsonl into the shape a JSON snapshot has.
+
+    `upto` stops after that many task lines, which is what makes an event log a
+    drop-in replacement for the partial_* snapshot sequence.
+    """
+    name = "workflow"
+    tasks: dict[str, dict] = {}
+    executions: dict[str, dict] = {}
+    files: list = []
+    machines: list = []
+    makespan = ""
+    seen = 0
+
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a partially flushed final line, while a run is live
+            kind = rec.get("event")
+            if kind == "run":
+                name = rec.get("name") or name
+            elif kind == "task":
+                if upto is not None and seen >= upto:
+                    break
+                seen += 1
+                tid = rec["id"]
+                tasks[tid] = {
+                    "id": tid,
+                    "name": rec.get("name", ""),
+                    "inputFiles": rec.get("inputFiles") or [],
+                    "outputFiles": rec.get("outputFiles") or [],
+                    "parents": [],
+                    "children": [],
+                }
+                if rec.get("execution"):
+                    executions[tid] = rec["execution"]
+            elif kind in ("complete", "error"):
+                files = rec.get("files") or []
+                machines = rec.get("machines") or []
+                makespan = rec.get("makespanInSeconds", "")
+
+    infer_edges(tasks)
+    return {
+        "name": name,
+        "workflow": {
+            "specification": {"tasks": list(tasks.values()), "files": files},
+            "execution": {
+                "tasks": [dict(ex, id=tid) for tid, ex in executions.items()],
+                "machines": machines,
+                "makespanInSeconds": makespan,
+            },
+        },
+    }
+
+
 class Snapshot:
     """Parsed view of a BigBrother JSON snapshot."""
 
@@ -68,8 +166,16 @@ class Snapshot:
 
     @classmethod
     def load(cls, path: str) -> "Snapshot":
+        """Load a JSON snapshot, or an events_*.jsonl event log."""
+        if path.endswith(".jsonl"):
+            return cls(replay_events(path))
         with open(path) as fh:
             return cls(json.load(fh))
+
+    @classmethod
+    def from_events(cls, path: str, upto: int | None = None) -> "Snapshot":
+        """The graph as it stood after `upto` tasks had finished."""
+        return cls(replay_events(path, upto))
 
     def edges(self, completed_only: bool) -> list[tuple[str, str]]:
         keep = self._kept_ids(completed_only)
@@ -187,12 +293,19 @@ def render(dot_text: str, out_path: str, fmt: str) -> None:
 def default_output(input_path: str, fmt: str) -> str:
     if fmt == "dot":
         return "-"
-    base = re.sub(r"\.json$", "", input_path)
+    base = re.sub(r"\.jsonl?$", "", input_path)
     return f"{base}.{fmt}"
 
 
 def newest_snapshot(directory: str) -> str | None:
-    candidates = glob.glob(os.path.join(directory, "partial_*.json")) + \
+    """The most recently written thing worth rendering in a run's output dir.
+
+    The event log counts: it is appended to after every task, so watching it
+    gives the same live view that partial snapshots used to, without the run
+    having to rewrite the whole graph each time.
+    """
+    candidates = glob.glob(os.path.join(directory, "events_*.jsonl")) + \
+                 glob.glob(os.path.join(directory, "partial_*.json")) + \
                  glob.glob(os.path.join(directory, "complete_*.json")) + \
                  glob.glob(os.path.join(directory, "error_*.json"))
     if not candidates:

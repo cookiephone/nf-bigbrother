@@ -257,35 +257,113 @@ class WfInstance {
         return task
     }
 
-    // Work out parents/children from the files: A is a parent of B when an
-    // output file of A shows up as an input file of B.
+    // Which task produced or consumed each file, and the task-level edges that
+    // follow. Kept up to date as tasks arrive so a completing task's edges cost
+    // only the files it touched, rather than a rescan of the whole run.
+    private final Map<String, Set<String>> producersOf = [:]
+    private final Map<String, Set<String>> consumersOf = [:]
+    private final Map<String, Set<String>> parentsOf = [:]
+    private final Map<String, Set<String>> childrenOf = [:]
+
+    // Register one task's files and link it to whatever it shares them with: A
+    // is a parent of B when an output file of A is an input file of B. Both
+    // directions are handled because a file's consumer can be registered before
+    // its producer. Idempotent, so re-registering a task is harmless.
+    void linkTask(String taskId, List<String> inputs, List<String> outputs) {
+        (outputs ?: []).each { file ->
+            if (!file) {
+                return
+            }
+            producersOf.computeIfAbsent(file) { new LinkedHashSet<String>() }.add(taskId)
+            consumersOf[file]?.each { consumer -> addEdge(taskId, consumer) }
+        }
+        (inputs ?: []).each { file ->
+            if (!file) {
+                return
+            }
+            consumersOf.computeIfAbsent(file) { new LinkedHashSet<String>() }.add(taskId)
+            producersOf[file]?.each { producer -> addEdge(producer, taskId) }
+        }
+    }
+
+    private void addEdge(String parent, String child) {
+        if (parent == child) {
+            return
+        }
+        parentsOf.computeIfAbsent(child) { new LinkedHashSet<String>() }.add(parent)
+        childrenOf.computeIfAbsent(parent) { new LinkedHashSet<String>() }.add(child)
+    }
+
+    List<String> parentsOfTask(String taskId) {
+        return ((parentsOf[taskId] ?: [] as Set<String>) as List<String>).sort()
+    }
+
+    // Copy the edges back onto the task specs, which is where they get
+    // serialised from. Cheap: one pass over the tasks, no file scanning.
+    void materializeEdges() {
+        taskSpecifications.each { task ->
+            task.parents = ((parentsOf[task.id] ?: [] as Set<String>) as List<String>).sort()
+            task.children = ((childrenOf[task.id] ?: [] as Set<String>) as List<String>).sort()
+        }
+    }
+
+    // Rebuild every edge from scratch off the task specs. The incremental path
+    // above keeps this unnecessary during a run, but it is what makes the model
+    // correct for a spec that was populated directly rather than through
+    // linkTask, and it is cheap enough at snapshot time.
     void inferDataDependencies() {
-        Map<String, List<String>> producers = [:].withDefault { [] }
-        taskSpecifications.each { task ->
-            (task.outputFiles ?: []).each { file ->
-                if (file) {
-                    producers[file] << task.id
-                }
-            }
-        }
+        producersOf.clear()
+        consumersOf.clear()
+        parentsOf.clear()
+        childrenOf.clear()
+        taskSpecifications.each { task -> linkTask(task.id, task.inputFiles, task.outputFiles) }
+        materializeEdges()
+    }
 
-        Map<String, Set<String>> parentsOf = [:].withDefault { [] as Set }
-        Map<String, Set<String>> childrenOf = [:].withDefault { [] as Set }
-        taskSpecifications.each { task ->
-            (task.inputFiles ?: []).each { file ->
-                producers[file].each { producerId ->
-                    if (producerId != task.id) {
-                        parentsOf[task.id] << producerId
-                        childrenOf[producerId] << task.id
-                    }
-                }
-            }
-        }
+    // One task as a self-contained line for the append-only event log. Children
+    // are deliberately absent: they are not known when a task finishes, and a
+    // reader replaying the log derives every edge from the file lists anyway.
+    Map taskEventMap(String taskId) {
+        final TaskSpecification spec = taskSpecIndex[taskId]
+        final TaskExecution exec = taskExecIndex[taskId]
+        return [
+            event       : 'task',
+            id          : taskId,
+            name        : spec?.name ?: '',
+            parents     : parentsOfTask(taskId),
+            inputFiles  : spec?.inputFiles ?: [],
+            outputFiles : spec?.outputFiles ?: [],
+            execution   : exec?.toMap(),
+        ]
+    }
 
-        taskSpecifications.each { task ->
-            task.parents = (parentsOf[task.id] as List<String>).sort()
-            task.children = (childrenOf[task.id] as List<String>).sort()
-        }
+    // Header line: everything about the run that is known before any task runs.
+    Map runEventMap() {
+        return [
+            event         : 'run',
+            name          : name,
+            description   : description,
+            createdAt     : createdAt,
+            executedAt    : executedAt,
+            schemaVersion : schemaVersion,
+            runtimeSystem : [
+                name    : runtimeSystemName,
+                url     : runtimeSystemUrl,
+                version : runtimeSystemVersion,
+            ],
+        ]
+    }
+
+    // Terminal line. The file table rides along here rather than on every task
+    // line, where the sizes would be repeated once per task that touched them.
+    Map endEventMap(String phase) {
+        return [
+            event             : phase,
+            makespanInSeconds : makespanInSeconds,
+            taskCount         : taskSpecifications.size(),
+            files             : fileSpecifications*.toMap(),
+            machines          : machineSpecifications*.toMap(),
+        ]
     }
 
     // Just the process name, without the qualified prefix or the (sample) suffix.

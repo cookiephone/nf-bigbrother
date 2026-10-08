@@ -22,8 +22,27 @@ class BigBrotherConfig implements ConfigScope {
     final String outputDir
 
     @ConfigOption
-    @Description('When `true` write a snapshot after every completed task, not just at the end (default: `true`).')
+    @Description('''
+        When `true` write a full snapshot during the run, not just at the end
+        (default: `false`). Each snapshot re-serialises the whole graph, so on a
+        run of any size this costs time quadratic in the task count; the event
+        log records the same information incrementally. Raise `snapshotEvery` to
+        thin the snapshots out rather than turning them off entirely.
+    ''')
     final boolean emitPartials
+
+    @ConfigOption
+    @Description('Write a partial snapshot every N completed tasks, when `emitPartials` is set (default: `1`).')
+    final int snapshotEvery
+
+    @ConfigOption
+    @Description('''
+        When `true` append one JSON line per task to `events_*.jsonl` as the run
+        proceeds (default: `true`). This is the cheap path: one line per task
+        rather than a whole-graph rewrite, and enough to reconstruct the graph at
+        any point in the run.
+    ''')
+    final boolean emitEvents
 
     @ConfigOption
     @Description('When `true` write a Graphviz `.dot` beside every JSON snapshot (default: `true`).')
@@ -42,9 +61,12 @@ class BigBrotherConfig implements ConfigScope {
     BigBrotherConfig(Map opts) {
         final Map cfg = opts ?: [:]
         this.outputDir = (cfg.outputDir ?: 'bigbrother') as String
-        this.emitPartials = cfg.containsKey('emitPartials') ? cfg.emitPartials as boolean : true
+        this.emitPartials = cfg.containsKey('emitPartials') ? cfg.emitPartials as boolean : false
+        this.emitEvents = cfg.containsKey('emitEvents') ? cfg.emitEvents as boolean : true
         this.emitDot = cfg.containsKey('emitDot') ? cfg.emitDot as boolean : true
         this.prefix = (cfg.prefix ?: '') as String
+        final int every = cfg.containsKey('snapshotEvery') ? cfg.snapshotEvery as int : 1
+        this.snapshotEvery = every > 0 ? every : 1
     }
 
 }
