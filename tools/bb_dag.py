@@ -102,7 +102,7 @@ def replay_events(path: str, upto: int | None = None) -> dict:
     executions: dict[str, dict] = {}
     files: list = []
     machines: list = []
-    makespan = ""
+    makespan = 0
     seen = 0
 
     with open(path) as fh:
@@ -135,7 +135,7 @@ def replay_events(path: str, upto: int | None = None) -> dict:
             elif kind in ("complete", "error"):
                 files = rec.get("files") or []
                 machines = rec.get("machines") or []
-                makespan = rec.get("makespanInSeconds", "")
+                makespan = rec.get("makespanInSeconds", 0)
 
     infer_edges(tasks)
     return {
@@ -161,7 +161,7 @@ class Snapshot:
         self.name = data.get("name", "workflow")
         self.tasks = {t["id"]: t for t in spec.get("tasks", [])}
         self.executions = {t["id"]: t for t in execu.get("tasks", [])}
-        self.makespan = execu.get("makespanInSeconds", "")
+        self.makespan = execu.get("makespanInSeconds", 0)
 
     @classmethod
     def load(cls, path: str) -> "Snapshot":

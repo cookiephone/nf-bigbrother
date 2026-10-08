@@ -188,7 +188,7 @@ class WfInstanceTest extends Specification {
     def 'the terminal event carries the file table and the makespan'() {
         given:
         def wf = new WfInstance()
-        wf.makespanInSeconds = '42'
+        wf.makespanInSeconds = 42.5d
         wf.touchTaskSpecification('1')
         wf.touchFileSpecification('/f', 123L)
 
@@ -197,7 +197,7 @@ class WfInstanceTest extends Specification {
 
         then:
         event.event == 'complete'
-        event.makespanInSeconds == '42'
+        event.makespanInSeconds == 42.5d
         event.taskCount == 1
         event.files == [[id: '/f', sizeInBytes: 123L]]
     }
@@ -258,11 +258,25 @@ class WfInstanceTest extends Specification {
         new TaskExecution(id: '1').toMap().bigbrother.timing.queueWaitSeconds == null
     }
 
+    def 'makespan is a number and an unattributed run omits the author block'() {
+        given: 'WfFormat types makespan as a number and rejects empty author strings'
+        def wf = new WfInstance()
+        wf.makespanInSeconds = 12.5d
+
+        when:
+        def json = new JsonSlurper().parseText(wf.toJson())
+
+        then:
+        json.workflow.execution.makespanInSeconds == 12.5d
+        !(json.workflow.execution.makespanInSeconds instanceof String)
+        !json.containsKey('author')
+    }
+
     def 'toJson produces the WfCommons-style structure'() {
         given:
         def wf = new WfInstance()
         wf.name = 'demo'
-        wf.schemaVersion = '1.5'
+        wf.schemaVersion = '1.6'
         wf.touchTaskSpecification('1').name = 'P:A'
 
         when:
@@ -270,10 +284,22 @@ class WfInstanceTest extends Specification {
 
         then:
         json.name == 'demo'
-        json.schemaVersion == '1.5'
+        json.schemaVersion == '1.6'
         json.workflow.specification.tasks.size() == 1
         json.workflow.specification.containsKey('files')
         json.workflow.execution.containsKey('tasks')
-        json.workflow.execution.containsKey('machines')
+
+        and: 'machines is omitted while empty, since WfFormat forbids an empty one'
+        !json.workflow.execution.containsKey('machines')
+    }
+
+    def 'machines appears once a machine is known'() {
+        given:
+        def wf = new WfInstance()
+        wf.touchMachineSpecification('node01')
+
+        expect:
+        new JsonSlurper().parseText(wf.toJson())
+            .workflow.execution.machines*.nodeName == ['node01']
     }
 }

@@ -18,7 +18,7 @@ ran. It appends one JSON line per task to an event log as the run proceeds, and
 writes a full JSON snapshot plus a matching Graphviz `.dot` at the end, so the
 graph is available at every point during the run and not just when it finishes.
 
-The final snapshot follows a WfCommons-style layout (schemaVersion 1.5):
+The final snapshot is a valid WfCommons WfFormat instance (schemaVersion 1.6):
 
 - `workflow.specification` holds the tasks (id, name, parents/children,
   input/output files) and the files with their sizes.

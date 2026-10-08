@@ -196,7 +196,8 @@ class WfInstance {
     String runtimeSystemUrl = ''
     String runtimeSystemVersion = ''
 
-    String makespanInSeconds = ''
+    // A number, not a string: WfFormat types this as `number` and rejects '0'.
+    double makespanInSeconds = 0
     String executedAt = ''
 
     List<TaskSpecification> taskSpecifications = []
@@ -411,19 +412,24 @@ class WfInstance {
         return value.replace('\\', '\\\\').replace('"', '\\"')
     }
 
+    // `author` and `machines` are both optional in WfFormat but may not be
+    // empty when present, so an unattributed run, or one without the wrapper
+    // patch, leaves them out rather than emitting hollow ones.
     Map toMap() {
         inferDataDependencies()
+        final Map execution = [
+            makespanInSeconds : makespanInSeconds,
+            executedAt        : executedAt,
+            tasks             : taskExecutions*.toMap(),
+        ]
+        if (machineSpecifications) {
+            execution.machines = machineSpecifications*.toMap()
+        }
         return [
             name          : name,
             description   : description,
             createdAt     : createdAt,
             schemaVersion : schemaVersion,
-            author        : [
-                name        : '',
-                email       : '',
-                institution : '',
-                country     : '',
-            ],
             runtimeSystem : [
                 name    : runtimeSystemName,
                 url     : runtimeSystemUrl,
@@ -434,12 +440,7 @@ class WfInstance {
                     tasks : taskSpecifications*.toMap(),
                     files : fileSpecifications*.toMap(),
                 ],
-                execution     : [
-                    makespanInSeconds : makespanInSeconds,
-                    executedAt        : executedAt,
-                    tasks             : taskExecutions*.toMap(),
-                    machines          : machineSpecifications*.toMap(),
-                ],
+                execution     : execution,
             ],
         ]
     }

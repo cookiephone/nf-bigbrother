@@ -67,7 +67,7 @@ class BigBrotherObserver implements TraceObserverV2 {
         wf.description = 'BigBrother physical execution trace'
         wf.createdAt = now
         wf.executedAt = now
-        wf.schemaVersion = '1.5'
+        wf.schemaVersion = '1.6'
         wf.runtimeSystemName = 'Nextflow'
         wf.runtimeSystemUrl = 'https://www.nextflow.io/'
         wf.runtimeSystemVersion = session.workflowMetadata?.nextflow?.version?.toString() ?: ''
@@ -148,7 +148,7 @@ class BigBrotherObserver implements TraceObserverV2 {
     @Override
     void onFlowComplete() {
         synchronized (lock) {
-            wf.makespanInSeconds = Duration.between(startTime, ZonedDateTime.now(ZoneOffset.UTC)).seconds.toString()
+            wf.makespanInSeconds = Duration.between(startTime, ZonedDateTime.now(ZoneOffset.UTC)).toMillis() / 1000.0d
             writeInstance('complete')
             if (config.emitEvents) {
                 appendEvent(wf.endEventMap('complete'))
