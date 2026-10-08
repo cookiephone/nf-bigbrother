@@ -20,6 +20,9 @@ scratch-*
 old
 visualization
 
+# paper work (plan, corpus tooling) — kept out of the plugin repo
+publication
+
 # python
 __pycache__
 *.pyc

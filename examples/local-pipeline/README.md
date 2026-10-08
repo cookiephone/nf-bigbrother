@@ -1,6 +1,6 @@
 # Local example pipeline
 
-A tiny pipeline for exercising the plugin without containers — it's just `cat`
+A tiny pipeline for exercising the plugin without containers. It's just `cat`
 and `mkdir`, but it keeps the parts that make a physical graph worth looking at:
 a reference (`PREPARE_GENOME`) built once and used by every `ALIGN`, a per-sample
 `TRIM → ALIGN → INDEX_BAM` chain over three samples, glob outputs

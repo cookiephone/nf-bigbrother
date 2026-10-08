@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Turn a run's snapshots into a GIF of the graph filling in.
+"""Turn a run's event log into a GIF of the graph filling in.
 
-Walks the partial_*/complete_* snapshots in order and builds one animated GIF
-where the physical graph grows a task at a time. The layout is done once on the
-final graph and then pinned, so nodes don't jump around between frames — each
-frame just shows the tasks that had run by that point, with the new ones
-highlighted.
+Replays the run a task at a time and builds one animated GIF where the physical
+graph grows as it goes. The layout is done once on the final graph and then
+pinned, so nodes don't jump around between frames. Each frame shows the tasks
+that had run by that point, with the new ones highlighted.
+
+Reads `events_*.jsonl` by preference, falling back to partial_*/complete_*
+snapshots for runs recorded before the event log existed.
 
     bb_animate.py bb_out -o dag-build.gif --fps 12
 """
 from __future__ import annotations
 
 import argparse
+import functools
 import glob
 import os
 import re
@@ -38,6 +41,22 @@ def snapshot_files(directory: str) -> list[str]:
     final = sorted(glob.glob(os.path.join(directory, "complete_*.json"))) or \
         sorted(glob.glob(os.path.join(directory, "error_*.json")))
     return partials + final
+
+
+def frame_loaders(directory: str) -> list:
+    """One callable per frame, in run order, each returning that frame's graph.
+
+    Prefers the event log, where the state after task N is a replay of the
+    first N lines. Falls back to partial_* files for runs recorded without one.
+    """
+    logs = glob.glob(os.path.join(directory, "events_*.jsonl"))
+    if logs:
+        path = max(logs, key=os.path.getmtime)
+        total = bb_dag.count_task_events(path)
+        if total:
+            return [functools.partial(bb_dag.Snapshot.from_events, path, n)
+                    for n in range(1, total + 1)]
+    return [functools.partial(bb_dag.Snapshot.load, f) for f in snapshot_files(directory)]
 
 
 def node_label(snap: bb_dag.Snapshot, tid: str) -> str:
@@ -132,7 +151,8 @@ def caption(img: Image.Image, text: str, total: int, done: int, bar_h: int) -> I
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("snapshot_dir", help="directory containing partial_*/complete_* snapshots")
+    p.add_argument("snapshot_dir",
+                   help="a run's output directory (events_*.jsonl, or partial_*/complete_* snapshots)")
     p.add_argument("-o", "--output", default="dag-build.gif", help="output GIF path")
     p.add_argument("--fps", type=float, default=12, help="frames per second (default 12)")
     p.add_argument("--every", type=int, default=1, help="keep every Nth snapshot (default 1)")
@@ -143,15 +163,15 @@ def main(argv=None) -> int:
     p.add_argument("--ranksep", type=float, default=1.0, help="dot ranksep (inches)")
     args = p.parse_args(argv)
 
-    files = snapshot_files(args.snapshot_dir)
-    if not files:
-        sys.exit(f"no snapshots found in {args.snapshot_dir}")
+    loaders = frame_loaders(args.snapshot_dir)
+    if not loaders:
+        sys.exit(f"no event log or snapshots found in {args.snapshot_dir}")
     # always keep the final frame even when sampling
-    kept = files[::args.every]
-    if files[-1] not in kept:
-        kept.append(files[-1])
+    kept = loaders[::args.every]
+    if loaders[-1] is not kept[-1]:
+        kept.append(loaders[-1])
 
-    final = bb_dag.Snapshot.load(files[-1])
+    final = loaders[-1]()
     print(f"laying out final graph ({len(final.tasks)} tasks) with dot...", file=sys.stderr)
     pos, _, _ = compute_layout(final, args.rankdir, args.nodesep, args.ranksep)
 
@@ -163,8 +183,8 @@ def main(argv=None) -> int:
     bar_h = 64
 
     with tempfile.TemporaryDirectory() as tmp:
-        for i, path in enumerate(kept):
-            snap = bb_dag.Snapshot.load(path)
+        for i, load in enumerate(kept):
+            snap = load()
             present = {t for t in snap.tasks if t in pos}
             edges = {(a, b) for a, b in snap.edges(False) if a in pos and b in pos}
             new_nodes = present - prev_present

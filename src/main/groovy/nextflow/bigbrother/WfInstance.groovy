@@ -5,8 +5,8 @@ import groovy.json.JsonOutput
 /**
  * The workflow instance we build up as the run goes and write out as JSON
  * (WfCommons-style spec + execution trace) or as a Graphviz physical graph.
- * The observer "touches" tasks, files and machines as events come in — created
- * the first time, reused after that.
+ * The observer "touches" tasks, files and machines as events come in, created
+ * the first time and reused after that.
  */
 
 /** Runtime measurements of a single task instance. */
@@ -28,6 +28,35 @@ class TaskExecution {
     long volCtxt = 0
     long invCtxt = 0
 
+    int requestedCpus = 0
+    long requestedMemoryBytes = 0
+    long requestedDiskBytes = 0
+    long requestedTimeMillis = 0
+
+    String pendingAt = ''
+    String submittedAt = ''
+    String completedAt = ''
+    // Null when submit or start is missing. A local executor really does wait
+    // ~0s, so an unknown wait has to stay distinct from a zero one.
+    Float queueWaitSeconds = null
+    float durationSeconds = 0.0
+
+    int attempt = 0
+    String exitStatus = ''
+    String status = ''
+    String errorAction = ''
+
+    String queue = ''
+    String executor = ''
+    String container = ''
+    String cpuModel = ''
+    String hostname = ''
+    String nativeId = ''
+
+    String processName = ''
+    String tag = ''
+    String taskHash = ''
+
     Map toMap() {
         return [
             id               : id,
@@ -45,6 +74,42 @@ class TaskExecution {
             command          : [
                 program   : commandProgram,
                 arguments : commandArguments,
+            ],
+            // Nested so the surrounding record stays valid WfFormat whatever
+            // gets added here.
+            bigbrother       : [
+                requested : [
+                    cpus          : requestedCpus,
+                    memoryInBytes : requestedMemoryBytes,
+                    diskInBytes   : requestedDiskBytes,
+                    timeInMillis  : requestedTimeMillis,
+                ],
+                timing    : [
+                    pendingAt        : pendingAt,
+                    submittedAt      : submittedAt,
+                    completedAt      : completedAt,
+                    queueWaitSeconds : queueWaitSeconds,
+                    durationSeconds  : durationSeconds,
+                ],
+                outcome   : [
+                    attempt     : attempt,
+                    exitStatus  : exitStatus,
+                    status      : status,
+                    errorAction : errorAction,
+                ],
+                placement : [
+                    queue     : queue,
+                    executor  : executor,
+                    container : container,
+                    cpuModel  : cpuModel,
+                    hostname  : hostname,
+                    nativeId  : nativeId,
+                ],
+                identity  : [
+                    process : processName,
+                    tag     : tag,
+                    hash    : taskHash,
+                ],
             ],
         ]
     }
@@ -131,7 +196,8 @@ class WfInstance {
     String runtimeSystemUrl = ''
     String runtimeSystemVersion = ''
 
-    String makespanInSeconds = ''
+    // A number, not a string: WfFormat types this as `number` and rejects '0'.
+    double makespanInSeconds = 0
     String executedAt = ''
 
     List<TaskSpecification> taskSpecifications = []
@@ -188,35 +254,108 @@ class WfInstance {
         return task
     }
 
-    // Work out parents/children from the files: A is a parent of B when an
-    // output file of A shows up as an input file of B.
+    // Maintained as tasks arrive, so linking a task costs only the files it
+    // touched instead of a rescan of the whole run.
+    private final Map<String, Set<String>> producersOf = [:]
+    private final Map<String, Set<String>> consumersOf = [:]
+    private final Map<String, Set<String>> parentsOf = [:]
+    private final Map<String, Set<String>> childrenOf = [:]
+
+    // A is a parent of B when an output file of A is an input file of B. Links
+    // in both directions because inputs are registered at submit but outputs
+    // only at completion, so a consumer can arrive before its producer.
+    // Idempotent, since a task is linked at submit and again at completion.
+    void linkTask(String taskId, List<String> inputs, List<String> outputs) {
+        (outputs ?: []).each { file ->
+            if (!file) {
+                return
+            }
+            producersOf.computeIfAbsent(file) { new LinkedHashSet<String>() }.add(taskId)
+            consumersOf[file]?.each { consumer -> addEdge(taskId, consumer) }
+        }
+        (inputs ?: []).each { file ->
+            if (!file) {
+                return
+            }
+            consumersOf.computeIfAbsent(file) { new LinkedHashSet<String>() }.add(taskId)
+            producersOf[file]?.each { producer -> addEdge(producer, taskId) }
+        }
+    }
+
+    private void addEdge(String parent, String child) {
+        if (parent == child) {
+            return
+        }
+        parentsOf.computeIfAbsent(child) { new LinkedHashSet<String>() }.add(parent)
+        childrenOf.computeIfAbsent(parent) { new LinkedHashSet<String>() }.add(child)
+    }
+
+    List<String> parentsOfTask(String taskId) {
+        return ((parentsOf[taskId] ?: [] as Set<String>) as List<String>).sort()
+    }
+
+    // Copy the edges onto the task specs, which is what gets serialised.
+    void materializeEdges() {
+        taskSpecifications.each { task ->
+            task.parents = ((parentsOf[task.id] ?: [] as Set<String>) as List<String>).sort()
+            task.children = ((childrenOf[task.id] ?: [] as Set<String>) as List<String>).sort()
+        }
+    }
+
+    // Full rebuild from the task specs. Only needed for specs populated
+    // directly rather than through linkTask, which is why snapshots still
+    // call it.
     void inferDataDependencies() {
-        Map<String, List<String>> producers = [:].withDefault { [] }
-        taskSpecifications.each { task ->
-            (task.outputFiles ?: []).each { file ->
-                if (file) {
-                    producers[file] << task.id
-                }
-            }
-        }
+        producersOf.clear()
+        consumersOf.clear()
+        parentsOf.clear()
+        childrenOf.clear()
+        taskSpecifications.each { task -> linkTask(task.id, task.inputFiles, task.outputFiles) }
+        materializeEdges()
+    }
 
-        Map<String, Set<String>> parentsOf = [:].withDefault { [] as Set }
-        Map<String, Set<String>> childrenOf = [:].withDefault { [] as Set }
-        taskSpecifications.each { task ->
-            (task.inputFiles ?: []).each { file ->
-                producers[file].each { producerId ->
-                    if (producerId != task.id) {
-                        parentsOf[task.id] << producerId
-                        childrenOf[producerId] << task.id
-                    }
-                }
-            }
-        }
+    // One line of the event log. Children are absent because they are not
+    // known when a task finishes, so a reader derives edges from the files.
+    Map taskEventMap(String taskId) {
+        final TaskSpecification spec = taskSpecIndex[taskId]
+        final TaskExecution exec = taskExecIndex[taskId]
+        return [
+            event       : 'task',
+            id          : taskId,
+            name        : spec?.name ?: '',
+            parents     : parentsOfTask(taskId),
+            inputFiles  : spec?.inputFiles ?: [],
+            outputFiles : spec?.outputFiles ?: [],
+            execution   : exec?.toMap(),
+        ]
+    }
 
-        taskSpecifications.each { task ->
-            task.parents = (parentsOf[task.id] as List<String>).sort()
-            task.children = (childrenOf[task.id] as List<String>).sort()
-        }
+    Map runEventMap() {
+        return [
+            event         : 'run',
+            name          : name,
+            description   : description,
+            createdAt     : createdAt,
+            executedAt    : executedAt,
+            schemaVersion : schemaVersion,
+            runtimeSystem : [
+                name    : runtimeSystemName,
+                url     : runtimeSystemUrl,
+                version : runtimeSystemVersion,
+            ],
+        ]
+    }
+
+    // The file table goes here rather than on each task line, where sizes
+    // would repeat once per task that touched the file.
+    Map endEventMap(String phase) {
+        return [
+            event             : phase,
+            makespanInSeconds : makespanInSeconds,
+            taskCount         : taskSpecifications.size(),
+            files             : fileSpecifications*.toMap(),
+            machines          : machineSpecifications*.toMap(),
+        ]
     }
 
     // Just the process name, without the qualified prefix or the (sample) suffix.
@@ -273,19 +412,24 @@ class WfInstance {
         return value.replace('\\', '\\\\').replace('"', '\\"')
     }
 
+    // `author` and `machines` are both optional in WfFormat but may not be
+    // empty when present, so an unattributed run, or one without the wrapper
+    // patch, leaves them out rather than emitting hollow ones.
     Map toMap() {
         inferDataDependencies()
+        final Map execution = [
+            makespanInSeconds : makespanInSeconds,
+            executedAt        : executedAt,
+            tasks             : taskExecutions*.toMap(),
+        ]
+        if (machineSpecifications) {
+            execution.machines = machineSpecifications*.toMap()
+        }
         return [
             name          : name,
             description   : description,
             createdAt     : createdAt,
             schemaVersion : schemaVersion,
-            author        : [
-                name        : '',
-                email       : '',
-                institution : '',
-                country     : '',
-            ],
             runtimeSystem : [
                 name    : runtimeSystemName,
                 url     : runtimeSystemUrl,
@@ -296,12 +440,7 @@ class WfInstance {
                     tasks : taskSpecifications*.toMap(),
                     files : fileSpecifications*.toMap(),
                 ],
-                execution     : [
-                    makespanInSeconds : makespanInSeconds,
-                    executedAt        : executedAt,
-                    tasks             : taskExecutions*.toMap(),
-                    machines          : machineSpecifications*.toMap(),
-                ],
+                execution     : execution,
             ],
         ]
     }
