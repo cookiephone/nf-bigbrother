@@ -12,11 +12,11 @@ import java.time.format.DateTimeFormatter
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
-import nextflow.processor.TaskHandler
 import nextflow.processor.TaskRun
 import nextflow.script.params.FileOutParam
-import nextflow.trace.TraceObserver
+import nextflow.trace.TraceObserverV2
 import nextflow.trace.TraceRecord
+import nextflow.trace.event.TaskEvent
 
 /**
  * Builds the physical execution graph of a run: one node per task, an edge
@@ -26,13 +26,18 @@ import nextflow.trace.TraceRecord
  */
 @Slf4j
 @CompileStatic
-class BigBrotherObserver implements TraceObserver {
+class BigBrotherObserver implements TraceObserverV2 {
 
     private final WfInstance wf = new WfInstance()
 
     // The callbacks run on many task threads at once, so everything that touches
     // the model or the snapshot counter goes through this lock.
     private final Object lock = new Object()
+
+    // When each task entered Nextflow's own queue. The trace record's `submit` is
+    // when the executor handed it to the backend, so the two together separate
+    // the wait inside Nextflow from the wait inside the scheduler.
+    private final Map<String, String> pendingAt = [:]
 
     private Session session
     private BigBrotherConfig config
@@ -67,8 +72,23 @@ class BigBrotherObserver implements TraceObserver {
     }
 
     @Override
-    void onProcessSubmit(TaskHandler handler, TraceRecord trace) {
-        final TaskRun task = handler.task
+    void onTaskPending(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if (task == null) {
+            return
+        }
+        final String now = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
+        synchronized (lock) {
+            pendingAt[task.id.toString()] = now
+        }
+    }
+
+    @Override
+    void onTaskSubmit(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if (task == null) {
+            return
+        }
         synchronized (lock) {
             final TaskSpecification spec = wf.touchTaskSpecification(task.id.toString())
             spec.name = task.name
@@ -78,17 +98,25 @@ class BigBrotherObserver implements TraceObserver {
     }
 
     @Override
-    void onProcessComplete(TaskHandler handler, TraceRecord trace) {
+    void onTaskComplete(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if (task == null) {
+            return
+        }
         synchronized (lock) {
-            recordTask(handler.task, trace)
+            recordTask(task, event.trace)
             writeSnapshot()
         }
     }
 
     @Override
-    void onProcessCached(TaskHandler handler, TraceRecord trace) {
+    void onTaskCached(TaskEvent event) {
+        final TaskRun task = event?.handler?.task
+        if (task == null) {
+            return
+        }
         synchronized (lock) {
-            recordTask(handler.task, trace)
+            recordTask(task, event.trace)
             writeSnapshot()
         }
     }
@@ -103,10 +131,11 @@ class BigBrotherObserver implements TraceObserver {
     }
 
     @Override
-    void onFlowError(TaskHandler handler, TraceRecord trace) {
+    void onFlowError(TaskEvent event) {
         synchronized (lock) {
-            if (handler != null) {
-                recordTask(handler.task, trace)
+            final TaskRun task = event?.handler?.task
+            if (task != null) {
+                recordTask(task, event.trace)
             }
             writeInstance('error')
             log.warn '[BigBrother] run failed; error snapshot written'
@@ -132,10 +161,24 @@ class BigBrotherObserver implements TraceObserver {
         registerFiles(spec.outputFiles)
 
         final TaskExecution exec = wf.touchTaskExecution(id)
+        exec.pendingAt = pendingAt[id] ?: ''
+        exec.executor = task.processor?.executor?.name ?: ''
+        exec.processName = task.processor?.name ?: ''
+
+        final String node = recordMachine(task.workDir)
+        if (node) {
+            exec.machines = [node] as String[]
+        }
+
+        // A failing run can reach onFlowError without a trace record.
+        if (trace == null) {
+            return
+        }
+
         exec.runtimeInSeconds = (traceLong(trace, 'realtime') / 1000.0d) as float
         final Long start = trace.get('start') as Long
         if (start != null) {
-            exec.executedAt = Instant.ofEpochMilli(start).atZone(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
+            exec.executedAt = isoMillis(start)
         }
         exec.avgCPU = traceFloat(trace, '%cpu')
         exec.readBytes = traceLong(trace, 'rchar')
@@ -148,9 +191,44 @@ class BigBrotherObserver implements TraceObserver {
         exec.commandProgram = trace.get('script')?.toString() ?: ''
         exec.commandArguments = [] as String[]
 
-        final String node = recordMachine(task.workDir)
-        if (node) {
-            exec.machines = [node] as String[]
+        // What the task asked for. Nextflow fills these from the process
+        // directives on every executor, so they need no wrapper patch.
+        exec.requestedCpus = traceLong(trace, 'cpus') as int
+        exec.requestedMemoryBytes = traceLong(trace, 'memory')
+        exec.requestedDiskBytes = traceLong(trace, 'disk')
+        exec.requestedTimeMillis = traceLong(trace, 'time')
+
+        final Long submit = trace.get('submit') as Long
+        final Long complete = trace.get('complete') as Long
+        if (submit != null) {
+            exec.submittedAt = isoMillis(submit)
+        }
+        if (complete != null) {
+            exec.completedAt = isoMillis(complete)
+        }
+        if (submit != null && start != null) {
+            exec.queueWaitSeconds = ((start - submit) / 1000.0d) as float
+        }
+        exec.durationSeconds = (traceLong(trace, 'duration') / 1000.0d) as float
+
+        exec.attempt = traceLong(trace, 'attempt') as int
+        exec.exitStatus = traceString(trace, 'exit')
+        exec.status = traceString(trace, 'status')
+        exec.errorAction = traceString(trace, 'error_action')
+
+        exec.queue = traceString(trace, 'queue')
+        exec.container = traceString(trace, 'container')
+        exec.cpuModel = traceString(trace, 'cpu_model')
+        // Declared by Nextflow but populated by no built-in executor; kept so it
+        // fills in by itself if one ever starts setting it. The machine details
+        // from the wrapper patch are what actually identify the node today.
+        exec.hostname = traceString(trace, 'hostname')
+        exec.nativeId = traceString(trace, 'native_id')
+
+        exec.tag = traceString(trace, 'tag')
+        exec.taskHash = traceString(trace, 'hash')
+        if (!exec.processName) {
+            exec.processName = traceString(trace, 'process')
         }
     }
 
@@ -269,10 +347,16 @@ class BigBrotherObserver implements TraceObserver {
         return node
     }
 
+    // TraceRecord stores typed values: 'num'/'mem'/'time' fields arrive as
+    // Numbers, but a few are strings. Going via toString() would turn a Double
+    // like 6.0 into an unparseable "6.0", so Numbers are read directly.
     private static long traceLong(TraceRecord trace, String key) {
         final Object value = trace.get(key)
         if (value == null) {
             return 0L
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue()
         }
         try {
             return (value as String).toLong()
@@ -287,12 +371,24 @@ class BigBrotherObserver implements TraceObserver {
         if (value == null) {
             return 0f
         }
+        if (value instanceof Number) {
+            return ((Number) value).floatValue()
+        }
         try {
             return (value as String).toFloat()
         }
         catch (NumberFormatException ignored) {
             return 0f
         }
+    }
+
+    private static String traceString(TraceRecord trace, String key) {
+        final Object value = trace.get(key)
+        return value != null ? value.toString() : ''
+    }
+
+    private static String isoMillis(long epochMillis) {
+        return Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT)
     }
 
     // --- writing snapshots ---

@@ -85,10 +85,38 @@ A run then fills `outputDir` with `partial_000_<name>_<uuid>.json` / `.dot`
 (one per completed task), a final `complete_<name>_<uuid>.*`, and an `error_*`
 snapshot instead if it dies partway.
 
-The machine details and a few extra counters (`peak_rss`, `vol_ctxt`,
-`inv_ctxt`) need an optional patch to Nextflow's task wrapper (see
-[Plugin Development](#plugin-development)). Without the patch the plugin still
-runs and produces the full graph; those specific fields are just left empty.
+The `machines` list — the hardware description of the nodes tasks ran on —
+needs an optional patch to Nextflow's task wrapper (see
+[Plugin Development](#plugin-development)). Everything else, including
+`peak_rss`, `peak_vmem`, `vol_ctxt` and `inv_ctxt`, comes from stock Nextflow
+and needs no patch. Note that those counters are *sampled*, first at 1 s and
+then less often, so a task that finishes in milliseconds reports zero for them
+however it was launched.
+
+### What Each Task Records
+
+Alongside the WfCommons fields, each task execution carries a `bigbrother`
+object with what the task asked the scheduler for and how it fared:
+
+| group | fields |
+| --- | --- |
+| `requested` | `cpus`, `memoryInBytes`, `diskInBytes`, `timeInMillis` |
+| `timing` | `pendingAt`, `submittedAt`, `completedAt`, `queueWaitSeconds`, `durationSeconds` |
+| `outcome` | `attempt`, `exitStatus`, `status`, `errorAction` |
+| `placement` | `queue`, `executor`, `container`, `cpuModel`, `hostname`, `nativeId` |
+| `identity` | `process`, `tag`, `hash` |
+
+The requested values are what make the measured ones interpretable: a task that
+peaked at 3 GB is unremarkable until you know it reserved 72 GB. `queueWaitSeconds`
+is the gap between the executor submitting the task and the task starting, and
+is `null` rather than `0` when either timestamp is missing, so a genuine
+zero wait stays distinguishable from an unknown one. `pendingAt` is when
+Nextflow itself queued the task, which is earlier than `submittedAt` and lets
+you separate waiting inside Nextflow from waiting inside the scheduler.
+
+`hostname` is reported by Nextflow but populated by none of the built-in
+executors, so it is normally empty; the patch's machine details are what
+identify a node today.
 
 ## Examples
 
@@ -146,17 +174,25 @@ runs the unit tests and the e2e test across Java 17/21 and Nextflow 25.10/26.04.
 
 ### The Command-Wrapper Patch
 
-Machine info and the extra counters are collected by a small patch to
-Nextflow's task command wrapper, applied to your local Nextflow jar:
+Machine info is collected by a small patch to Nextflow's task command wrapper,
+applied to your local Nextflow jar:
 
 ```bash
 patch/patch-nextflow.sh              # patches $NXF_JAR (default: the 25.04.2 jar)
 ```
 
 The patch injects a `bblog.log` into each task's work directory, which the
-plugin reads back. It is tied to a specific Nextflow version's wrapper (the
-bundled copy targets 25.04.2), so regenerate it if you patch a different
+plugin reads back for the node name and its hardware. That is *all* it adds —
+diffing `patch/custom-command-trace.txt` against the stock wrapper shows the
+`bblog.log` block and nothing else of substance, so the resource counters are
+stock Nextflow either way. It is tied to a specific Nextflow version's wrapper
+(the bundled copy targets 25.04.2), so regenerate it if you patch a different
 version. It is entirely optional; the plugin degrades gracefully without it.
+
+Because it needs a patched jar, the patch is also the one thing that makes the
+plugin awkward to deploy somewhere you do not administer. Everything needed to
+compare requested against used resources works unpatched, from a single
+`plugins` line.
 
 ## License
 

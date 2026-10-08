@@ -84,6 +84,62 @@ class WfInstanceTest extends Specification {
         dot.contains('"t1" -> "t2"')
     }
 
+    def 'task execution keeps the base WfFormat fields at the top level'() {
+        given:
+        def exec = new TaskExecution(id: '1', runtimeInSeconds: 2.5f, memoryInBytes: 1024L, peakRss: 2048L)
+
+        when:
+        def map = exec.toMap()
+
+        then: 'the fields consumed by the bundled tools stay where they were'
+        map.id == '1'
+        map.runtimeInSeconds == 2.5f
+        map.memoryInBytes == 1024L
+        map.peak_rss == 2048L
+        map.command instanceof Map
+    }
+
+    def 'the added fields are nested so the base record stays valid WfFormat'() {
+        given:
+        def exec = new TaskExecution(
+            id: '1',
+            requestedCpus: 12,
+            requestedMemoryBytes: 77309411328L,   // 72 GB, i.e. process_high
+            peakRss: 3543348020L,                 // ~3.3 GB actually used
+            queueWaitSeconds: 118.0f,
+            attempt: 2,
+            status: 'COMPLETED',
+            exitStatus: '0',
+            queue: 'normal',
+            executor: 'slurm',
+            processName: 'NFCORE_CHIPSEQ:CHIPSEQ:TRIMGALORE',
+            taskHash: '9f/b7ca45')
+
+        when:
+        def map = exec.toMap()
+        def bb = map.bigbrother
+
+        then: 'requested resources sit beside the measured ones, not mixed in'
+        bb.requested.cpus == 12
+        bb.requested.memoryInBytes == 77309411328L
+        map.peak_rss == 3543348020L
+
+        and: 'the scheduling fields a resource study needs are present'
+        bb.timing.queueWaitSeconds == 118.0f
+        bb.outcome.attempt == 2
+        bb.outcome.status == 'COMPLETED'
+        bb.outcome.exitStatus == '0'
+        bb.placement.queue == 'normal'
+        bb.placement.executor == 'slurm'
+        bb.identity.process == 'NFCORE_CHIPSEQ:CHIPSEQ:TRIMGALORE'
+        bb.identity.hash == '9f/b7ca45'
+    }
+
+    def 'queue wait is null, not zero, when it was never observed'() {
+        expect: 'a genuine zero wait on a local executor must stay distinguishable'
+        new TaskExecution(id: '1').toMap().bigbrother.timing.queueWaitSeconds == null
+    }
+
     def 'toJson produces the WfCommons-style structure'() {
         given:
         def wf = new WfInstance()

@@ -28,6 +28,39 @@ class TaskExecution {
     long volCtxt = 0
     long invCtxt = 0
 
+    // What the task asked the scheduler for, as opposed to what it used above.
+    // The gap between the two is the thing resource-allocation studies measure.
+    int requestedCpus = 0
+    long requestedMemoryBytes = 0
+    long requestedDiskBytes = 0
+    long requestedTimeMillis = 0
+
+    // Lifecycle timestamps. `executedAt` above is the start; these bracket it so
+    // the time a task spent waiting is separable from the time it spent running.
+    String pendingAt = ''
+    String submittedAt = ''
+    String completedAt = ''
+    // Null rather than zero when submit or start is unknown: on a local executor
+    // the wait genuinely is ~0, and a study has to tell those two cases apart.
+    Float queueWaitSeconds = null
+    float durationSeconds = 0.0
+
+    int attempt = 0
+    String exitStatus = ''
+    String status = ''
+    String errorAction = ''
+
+    String queue = ''
+    String executor = ''
+    String container = ''
+    String cpuModel = ''
+    String hostname = ''
+    String nativeId = ''
+
+    String processName = ''
+    String tag = ''
+    String taskHash = ''
+
     Map toMap() {
         return [
             id               : id,
@@ -45,6 +78,42 @@ class TaskExecution {
             command          : [
                 program   : commandProgram,
                 arguments : commandArguments,
+            ],
+            // Nested under one key so the surrounding record stays a valid
+            // WfFormat task execution regardless of what we add here.
+            bigbrother       : [
+                requested : [
+                    cpus          : requestedCpus,
+                    memoryInBytes : requestedMemoryBytes,
+                    diskInBytes   : requestedDiskBytes,
+                    timeInMillis  : requestedTimeMillis,
+                ],
+                timing    : [
+                    pendingAt        : pendingAt,
+                    submittedAt      : submittedAt,
+                    completedAt      : completedAt,
+                    queueWaitSeconds : queueWaitSeconds,
+                    durationSeconds  : durationSeconds,
+                ],
+                outcome   : [
+                    attempt     : attempt,
+                    exitStatus  : exitStatus,
+                    status      : status,
+                    errorAction : errorAction,
+                ],
+                placement : [
+                    queue     : queue,
+                    executor  : executor,
+                    container : container,
+                    cpuModel  : cpuModel,
+                    hostname  : hostname,
+                    nativeId  : nativeId,
+                ],
+                identity  : [
+                    process : processName,
+                    tag     : tag,
+                    hash    : taskHash,
+                ],
             ],
         ]
     }
