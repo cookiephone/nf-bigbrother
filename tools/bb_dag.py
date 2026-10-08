@@ -5,7 +5,7 @@ Takes either a JSON snapshot or an `events_*.jsonl` event log and produces a
 Graphviz DOT graph (one node per task, edges from the file dependencies),
 rendering it to SVG/PNG/PDF if the `dot` binary is around. --watch keeps
 re-rendering the newest output in a directory, which is handy while a run is
-going -- the event log is appended to after every task, so it stays current.
+going, since the event log is appended to after every task.
 
     bb_dag.py bb_out/complete_*.json                  # dot to stdout
     bb_dag.py bb_out/events_*.jsonl -f svg -o graph.svg
@@ -59,9 +59,8 @@ def human_bytes(n: int) -> str:
 def infer_edges(tasks: dict) -> None:
     """Fill in parents/children from the file lists, as the plugin does.
 
-    A is a parent of B when an output file of A is an input file of B. Needed
-    when replaying an event log, whose task lines carry the files but not the
-    children -- a task's children are not known at the moment it finishes.
+    Needed when replaying an event log, whose task lines carry the files but
+    not the children.
     """
     producers: dict[str, list[str]] = {}
     for tid, task in tasks.items():
@@ -83,7 +82,7 @@ def infer_edges(tasks: dict) -> None:
 
 
 def count_task_events(path: str) -> int:
-    """How many task lines an event log holds, i.e. how many frames it can make."""
+    """How many task lines an event log holds."""
     total = 0
     with open(path) as fh:
         for line in fh:
@@ -95,8 +94,8 @@ def count_task_events(path: str) -> int:
 def replay_events(path: str, upto: int | None = None) -> dict:
     """Replay an events_*.jsonl into the shape a JSON snapshot has.
 
-    `upto` stops after that many task lines, which is what makes an event log a
-    drop-in replacement for the partial_* snapshot sequence.
+    `upto` stops after that many task lines, giving the graph as it stood at
+    that point in the run.
     """
     name = "workflow"
     tasks: dict[str, dict] = {}
@@ -114,7 +113,7 @@ def replay_events(path: str, upto: int | None = None) -> dict:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
-                continue  # a partially flushed final line, while a run is live
+                continue  # partially flushed final line, run still live
             kind = rec.get("event")
             if kind == "run":
                 name = rec.get("name") or name
@@ -228,7 +227,7 @@ def build_dot(snap: Snapshot, *, cluster: bool, completed_only: bool,
     out = ["digraph physical {"]
     out.append(f'  rankdir={rankdir};')
     out.append('  labelloc="t";')
-    out.append(f'  label="{_dot_escape(snap.name)} — physical execution graph '
+    out.append(f'  label="{_dot_escape(snap.name)}: physical execution graph '
                f'({len(keep)} tasks)";')
     out.append('  fontname="Helvetica"; fontsize=14;')
     out.append('  node [shape=box, style="rounded,filled", '
@@ -298,12 +297,7 @@ def default_output(input_path: str, fmt: str) -> str:
 
 
 def newest_snapshot(directory: str) -> str | None:
-    """The most recently written thing worth rendering in a run's output dir.
-
-    The event log counts: it is appended to after every task, so watching it
-    gives the same live view that partial snapshots used to, without the run
-    having to rewrite the whole graph each time.
-    """
+    """The most recently written thing worth rendering in an output dir."""
     candidates = glob.glob(os.path.join(directory, "events_*.jsonl")) + \
                  glob.glob(os.path.join(directory, "partial_*.json")) + \
                  glob.glob(os.path.join(directory, "complete_*.json")) + \

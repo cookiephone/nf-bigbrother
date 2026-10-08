@@ -3,8 +3,8 @@
 
 Replays the run a task at a time and builds one animated GIF where the physical
 graph grows as it goes. The layout is done once on the final graph and then
-pinned, so nodes don't jump around between frames — each frame just shows the
-tasks that had run by that point, with the new ones highlighted.
+pinned, so nodes don't jump around between frames. Each frame shows the tasks
+that had run by that point, with the new ones highlighted.
 
 Reads `events_*.jsonl` by preference, falling back to partial_*/complete_*
 snapshots for runs recorded before the event log existed.
@@ -46,11 +46,8 @@ def snapshot_files(directory: str) -> list[str]:
 def frame_loaders(directory: str) -> list:
     """One callable per frame, in run order, each returning that frame's graph.
 
-    Prefers the event log: it holds a line per task, so the state after task N
-    is just a replay of the first N lines -- the same sequence the partial_*
-    snapshots used to provide, without the run paying to rewrite the whole
-    graph after every task. Falls back to partial_* files when a run was
-    recorded with `emitPartials` and no event log.
+    Prefers the event log, where the state after task N is a replay of the
+    first N lines. Falls back to partial_* files for runs recorded without one.
     """
     logs = glob.glob(os.path.join(directory, "events_*.jsonl"))
     if logs:

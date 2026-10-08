@@ -28,7 +28,7 @@ The final snapshot follows a WfCommons-style layout (schemaVersion 1.5):
 Parents and children come from the files: if task A writes a file that task B
 reads, A is a parent of B.
 
-The event log (`events_*.jsonl`) carries the same information incrementally —
+The event log (`events_*.jsonl`) carries the same information incrementally:
 a `run` header, one `task` line each time a task finishes, and a terminal
 `complete` (or `error`) line with the file table and makespan. Replaying its
 first *N* task lines reconstructs the graph as it stood after *N* tasks, which
@@ -59,14 +59,14 @@ bigbrother {
 ```
 
 `emitPartials` defaulted to `true` up to 1.0.1, which wrote a
-`partial_NNN_*.json` after every task. The event log supersedes it — same
-information, one line per task instead of a full rewrite — so it now defaults
-to `false`. Turn it back on if you have tooling that reads the partial files,
-and consider `snapshotEvery` to thin them out on a large run.
+`partial_NNN_*.json` after every task. The event log supersedes it, carrying
+the same information one line per task instead of a full rewrite, so it now
+defaults to `false`. Turn it back on if you have tooling that reads the
+partial files, and use `snapshotEvery` to thin them out on a large run.
 
 ### Observing a Pipeline You Don't Own
 
-For a pipeline you only run — an nf-core workflow, say — enable the plugin with
+For a pipeline you only run, an nf-core workflow say, enable the plugin with
 `NXF_PLUGINS_DEFAULT` rather than a `plugins` block:
 
 ```bash
@@ -77,7 +77,7 @@ NXF_PLUGINS_DEFAULT=nf-bigbrother@1.0.1 \
 Do **not** reach for `-plugins nf-bigbrother@1.0.1`, and do not put a `plugins`
 block in a `-c` config. Both *replace* the pipeline's own `plugins` declaration
 rather than adding to it, which silently unpins whatever the pipeline depends
-on. nf-core/demo 1.2.0 pins `nf-schema@2.7.2`; unpinned, Nextflow 26.04 resolves
+on. nf-core/demo 1.2.0 pins `nf-schema@2.7.2`. Unpinned, Nextflow 26.04 resolves
 it to `nf-schema@3.0.0`, whose changed `paramsSummaryLog` signature aborts the
 run before a single task starts:
 
@@ -96,7 +96,7 @@ plugins {
 }
 ```
 
-The `bigbrother` settings above work the same way in a `-c` config file; only
+The `bigbrother` settings above work the same way in a `-c` config file. Only
 the `plugins` block has this replace-not-merge behaviour.
 
 A run then fills `outputDir` with `events_<name>_<uuid>.jsonl` (appended to as
@@ -104,7 +104,7 @@ it goes), a final `complete_<name>_<uuid>.json` / `.dot`, and an `error_*`
 snapshot instead if it dies partway. With `emitPartials` on you also get
 `partial_NNN_<name>_<uuid>.json` / `.dot`.
 
-The `machines` list — the hardware description of the nodes tasks ran on —
+The `machines` list, the hardware description of the nodes tasks ran on,
 needs an optional patch to Nextflow's task wrapper (see
 [Plugin Development](#plugin-development)). Everything else, including
 `peak_rss`, `peak_vmem`, `vol_ctxt` and `inv_ctxt`, comes from stock Nextflow
@@ -134,14 +134,14 @@ Nextflow itself queued the task, which is earlier than `submittedAt` and lets
 you separate waiting inside Nextflow from waiting inside the scheduler.
 
 `hostname` is reported by Nextflow but populated by none of the built-in
-executors, so it is normally empty; the patch's machine details are what
+executors, so it is normally empty. The patch's machine details are what
 identify a node today.
 
 ## Examples
 
 Running any pipeline with the plugin enabled produces the output described
-above. The final snapshot already has a plain `.dot` beside it; the bundled
-Python tools turn either the snapshot or the event log into something nicer.
+above. The final snapshot already has a plain `.dot` beside it, and the
+bundled Python tools turn either that or the event log into something nicer.
 
 `tools/bb_dag.py` renders a graph (grouping by process, colour, node metrics).
 It uses only the standard library, plus the `dot` binary for images:
@@ -205,12 +205,13 @@ patch/patch-nextflow.sh              # patches $NXF_JAR (default: the 25.04.2 ja
 ```
 
 The patch injects a `bblog.log` into each task's work directory, which the
-plugin reads back for the node name and its hardware. That is *all* it adds —
+plugin reads back for the node name and its hardware. That is *all* it adds:
 diffing `patch/custom-command-trace.txt` against the stock wrapper shows the
 `bblog.log` block and nothing else of substance, so the resource counters are
 stock Nextflow either way. It is tied to a specific Nextflow version's wrapper
 (the bundled copy targets 25.04.2), so regenerate it if you patch a different
-version. It is entirely optional; the plugin degrades gracefully without it.
+version. It is entirely optional, and the plugin degrades gracefully without
+it.
 
 Because it needs a patched jar, the patch is also the one thing that makes the
 plugin awkward to deploy somewhere you do not administer. Everything needed to

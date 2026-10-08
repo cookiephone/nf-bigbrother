@@ -22,9 +22,9 @@ import nextflow.trace.event.TaskEvent
 
 /**
  * Builds the physical execution graph of a run: one node per task, an edge
- * wherever one task's output file is another task's input. After every task it
- * writes a JSON snapshot and a matching DOT of the graph so far, so the run can
- * be watched as it goes. Also records each task's resource usage and machine.
+ * wherever one task's output file is another task's input. Appends a line per
+ * task to the event log as the run goes, and writes a full JSON snapshot and
+ * DOT at the end. Also records each task's resource usage and machine.
  */
 @Slf4j
 @CompileStatic
@@ -32,13 +32,13 @@ class BigBrotherObserver implements TraceObserverV2 {
 
     private final WfInstance wf = new WfInstance()
 
-    // The callbacks run on many task threads at once, so everything that touches
-    // the model or the snapshot counter goes through this lock.
+    // Callbacks run on many task threads at once, so model mutation and the
+    // snapshot counter go through this lock.
     private final Object lock = new Object()
 
-    // When each task entered Nextflow's own queue. The trace record's `submit` is
-    // when the executor handed it to the backend, so the two together separate
-    // the wait inside Nextflow from the wait inside the scheduler.
+    // When each task entered Nextflow's own queue. The trace record's `submit`
+    // is later, when the executor handed it to the backend, so the two
+    // together separate waiting in Nextflow from waiting in the scheduler.
     private final Map<String, String> pendingAt = [:]
 
     private Session session
@@ -98,9 +98,8 @@ class BigBrotherObserver implements TraceObserverV2 {
         if (task == null) {
             return
         }
-        // Walking the filesystem and stat-ing files happens before the lock is
-        // taken: it is the slow part, it needs nothing from the model, and
-        // holding the lock across it would serialise every concurrent task.
+        // Walk and stat before taking the lock. It needs nothing from the
+        // model, and holding the lock across it serialises every task.
         final String id = task.id.toString()
         final List<String> inputs = collectInputFiles(task)
         final Map<String, Long> sizes = statFiles(inputs)
@@ -129,8 +128,7 @@ class BigBrotherObserver implements TraceObserverV2 {
         }
     }
 
-    // Collect a finished task's files off the lock, then take the lock just long
-    // enough to fold it into the model and write it out.
+    // Collect files off the lock, then lock only to update and write.
     private void recordAndEmit(TaskRun task, TraceRecord trace) {
         final List<String> inputs = collectInputFiles(task)
         final List<String> outputs = collectOutputFiles(task)
@@ -176,7 +174,7 @@ class BigBrotherObserver implements TraceObserverV2 {
             if (config.emitEvents) {
                 appendEvent(wf.endEventMap('error'))
             }
-            log.warn '[BigBrother] run failed; error snapshot written'
+            log.warn '[BigBrother] run failed, error snapshot written'
         }
     }
 
@@ -185,8 +183,7 @@ class BigBrotherObserver implements TraceObserverV2 {
 
     // --- helpers ---
 
-    // Fold a task's files, resource metrics and machine into the model. The
-    // caller has already done the filesystem work, off the lock.
+    // Caller has already done the filesystem work, off the lock.
     private void recordTask(TaskRun task, TraceRecord trace, List<String> inputs,
                             List<String> outputs, Map<String, Long> sizes) {
         final String id = task.id.toString()
@@ -232,8 +229,8 @@ class BigBrotherObserver implements TraceObserverV2 {
         exec.commandProgram = trace.get('script')?.toString() ?: ''
         exec.commandArguments = [] as String[]
 
-        // What the task asked for. Nextflow fills these from the process
-        // directives on every executor, so they need no wrapper patch.
+        // Filled from the process directives on every executor, so these
+        // need no wrapper patch.
         exec.requestedCpus = traceLong(trace, 'cpus') as int
         exec.requestedMemoryBytes = traceLong(trace, 'memory')
         exec.requestedDiskBytes = traceLong(trace, 'disk')
@@ -260,9 +257,8 @@ class BigBrotherObserver implements TraceObserverV2 {
         exec.queue = traceString(trace, 'queue')
         exec.container = traceString(trace, 'container')
         exec.cpuModel = traceString(trace, 'cpu_model')
-        // Declared by Nextflow but populated by no built-in executor; kept so it
-        // fills in by itself if one ever starts setting it. The machine details
-        // from the wrapper patch are what actually identify the node today.
+        // Declared by Nextflow but set by no built-in executor, so normally
+        // empty. Node identity comes from the wrapper patch instead.
         exec.hostname = traceString(trace, 'hostname')
         exec.nativeId = traceString(trace, 'native_id')
 
@@ -312,7 +308,7 @@ class BigBrotherObserver implements TraceObserverV2 {
         }
     }
 
-    // Replace directories with the files inside them; leave plain files alone.
+    // Replace directories with the files inside them, leave files alone.
     private List<String> expandToFiles(List<Path> paths) {
         List<String> result = []
         paths.each { path ->
@@ -334,8 +330,7 @@ class BigBrotherObserver implements TraceObserverV2 {
         return result.unique()
     }
 
-    // Stat a run's worth of files. Called before the lock is taken, since this
-    // touches the filesystem once per file and the model is not involved.
+    // Called before the lock is taken, see recordAndEmit.
     private static Map<String, Long> statFiles(List<String> first, List<String> second = null) {
         final Map<String, Long> sizes = new HashMap<>()
         [first, second].each { group ->
@@ -403,9 +398,8 @@ class BigBrotherObserver implements TraceObserverV2 {
         return node
     }
 
-    // TraceRecord stores typed values: 'num'/'mem'/'time' fields arrive as
-    // Numbers, but a few are strings. Going via toString() would turn a Double
-    // like 6.0 into an unparseable "6.0", so Numbers are read directly.
+    // TraceRecord hands back Numbers for 'num'/'mem'/'time' fields. Going via
+    // toString() turns a Double like 6.0 into "6.0", which toLong() rejects.
     private static long traceLong(TraceRecord trace, String key) {
         final Object value = trace.get(key)
         if (value == null) {
@@ -449,8 +443,7 @@ class BigBrotherObserver implements TraceObserverV2 {
 
     // --- writing output ---
 
-    // Append one JSON object as a single line. Done under the same lock as the
-    // model update so lines land in the order tasks finished.
+    // Under the model lock, so lines land in task completion order.
     private void appendEvent(Map event) {
         if (eventLog == null) {
             return

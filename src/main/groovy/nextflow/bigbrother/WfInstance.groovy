@@ -5,8 +5,8 @@ import groovy.json.JsonOutput
 /**
  * The workflow instance we build up as the run goes and write out as JSON
  * (WfCommons-style spec + execution trace) or as a Graphviz physical graph.
- * The observer "touches" tasks, files and machines as events come in — created
- * the first time, reused after that.
+ * The observer "touches" tasks, files and machines as events come in, created
+ * the first time and reused after that.
  */
 
 /** Runtime measurements of a single task instance. */
@@ -28,20 +28,16 @@ class TaskExecution {
     long volCtxt = 0
     long invCtxt = 0
 
-    // What the task asked the scheduler for, as opposed to what it used above.
-    // The gap between the two is the thing resource-allocation studies measure.
     int requestedCpus = 0
     long requestedMemoryBytes = 0
     long requestedDiskBytes = 0
     long requestedTimeMillis = 0
 
-    // Lifecycle timestamps. `executedAt` above is the start; these bracket it so
-    // the time a task spent waiting is separable from the time it spent running.
     String pendingAt = ''
     String submittedAt = ''
     String completedAt = ''
-    // Null rather than zero when submit or start is unknown: on a local executor
-    // the wait genuinely is ~0, and a study has to tell those two cases apart.
+    // Null when submit or start is missing. A local executor really does wait
+    // ~0s, so an unknown wait has to stay distinct from a zero one.
     Float queueWaitSeconds = null
     float durationSeconds = 0.0
 
@@ -79,8 +75,8 @@ class TaskExecution {
                 program   : commandProgram,
                 arguments : commandArguments,
             ],
-            // Nested under one key so the surrounding record stays a valid
-            // WfFormat task execution regardless of what we add here.
+            // Nested so the surrounding record stays valid WfFormat whatever
+            // gets added here.
             bigbrother       : [
                 requested : [
                     cpus          : requestedCpus,
@@ -257,18 +253,17 @@ class WfInstance {
         return task
     }
 
-    // Which task produced or consumed each file, and the task-level edges that
-    // follow. Kept up to date as tasks arrive so a completing task's edges cost
-    // only the files it touched, rather than a rescan of the whole run.
+    // Maintained as tasks arrive, so linking a task costs only the files it
+    // touched instead of a rescan of the whole run.
     private final Map<String, Set<String>> producersOf = [:]
     private final Map<String, Set<String>> consumersOf = [:]
     private final Map<String, Set<String>> parentsOf = [:]
     private final Map<String, Set<String>> childrenOf = [:]
 
-    // Register one task's files and link it to whatever it shares them with: A
-    // is a parent of B when an output file of A is an input file of B. Both
-    // directions are handled because a file's consumer can be registered before
-    // its producer. Idempotent, so re-registering a task is harmless.
+    // A is a parent of B when an output file of A is an input file of B. Links
+    // in both directions because inputs are registered at submit but outputs
+    // only at completion, so a consumer can arrive before its producer.
+    // Idempotent, since a task is linked at submit and again at completion.
     void linkTask(String taskId, List<String> inputs, List<String> outputs) {
         (outputs ?: []).each { file ->
             if (!file) {
@@ -298,8 +293,7 @@ class WfInstance {
         return ((parentsOf[taskId] ?: [] as Set<String>) as List<String>).sort()
     }
 
-    // Copy the edges back onto the task specs, which is where they get
-    // serialised from. Cheap: one pass over the tasks, no file scanning.
+    // Copy the edges onto the task specs, which is what gets serialised.
     void materializeEdges() {
         taskSpecifications.each { task ->
             task.parents = ((parentsOf[task.id] ?: [] as Set<String>) as List<String>).sort()
@@ -307,10 +301,9 @@ class WfInstance {
         }
     }
 
-    // Rebuild every edge from scratch off the task specs. The incremental path
-    // above keeps this unnecessary during a run, but it is what makes the model
-    // correct for a spec that was populated directly rather than through
-    // linkTask, and it is cheap enough at snapshot time.
+    // Full rebuild from the task specs. Only needed for specs populated
+    // directly rather than through linkTask, which is why snapshots still
+    // call it.
     void inferDataDependencies() {
         producersOf.clear()
         consumersOf.clear()
@@ -320,9 +313,8 @@ class WfInstance {
         materializeEdges()
     }
 
-    // One task as a self-contained line for the append-only event log. Children
-    // are deliberately absent: they are not known when a task finishes, and a
-    // reader replaying the log derives every edge from the file lists anyway.
+    // One line of the event log. Children are absent because they are not
+    // known when a task finishes, so a reader derives edges from the files.
     Map taskEventMap(String taskId) {
         final TaskSpecification spec = taskSpecIndex[taskId]
         final TaskExecution exec = taskExecIndex[taskId]
@@ -337,7 +329,6 @@ class WfInstance {
         ]
     }
 
-    // Header line: everything about the run that is known before any task runs.
     Map runEventMap() {
         return [
             event         : 'run',
@@ -354,8 +345,8 @@ class WfInstance {
         ]
     }
 
-    // Terminal line. The file table rides along here rather than on every task
-    // line, where the sizes would be repeated once per task that touched them.
+    // The file table goes here rather than on each task line, where sizes
+    // would repeat once per task that touched the file.
     Map endEventMap(String phase) {
         return [
             event             : phase,

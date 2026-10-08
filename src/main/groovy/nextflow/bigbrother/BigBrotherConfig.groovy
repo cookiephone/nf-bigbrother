@@ -24,10 +24,9 @@ class BigBrotherConfig implements ConfigScope {
     @ConfigOption
     @Description('''
         When `true` write a full snapshot during the run, not just at the end
-        (default: `false`). Each snapshot re-serialises the whole graph, so on a
-        run of any size this costs time quadratic in the task count; the event
-        log records the same information incrementally. Raise `snapshotEvery` to
-        thin the snapshots out rather than turning them off entirely.
+        (default: `false`). Each snapshot re-serialises the whole graph, so
+        writing one per task costs time and space quadratic in the task count.
+        The event log records the same information incrementally.
     ''')
     final boolean emitPartials
 
@@ -38,9 +37,8 @@ class BigBrotherConfig implements ConfigScope {
     @ConfigOption
     @Description('''
         When `true` append one JSON line per task to `events_*.jsonl` as the run
-        proceeds (default: `true`). This is the cheap path: one line per task
-        rather than a whole-graph rewrite, and enough to reconstruct the graph at
-        any point in the run.
+        proceeds (default: `true`). Replaying the first N task lines gives the
+        graph as it stood after N tasks.
     ''')
     final boolean emitEvents
 
@@ -52,8 +50,8 @@ class BigBrotherConfig implements ConfigScope {
     @Description('String prepended to every snapshot file name (default: `\'\'`).')
     final String prefix
 
-    // Nextflow builds the scope through the no-arg constructor to read the schema;
-    // the observer uses the Map one to read the values an actual run was given.
+    // Nextflow builds the scope through the no-arg constructor to read the
+    // schema. The observer uses the Map one for an actual run's values.
     BigBrotherConfig() {
         this([:])
     }
