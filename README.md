@@ -45,7 +45,7 @@ In a pipeline you own, enable the plugin from its `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-bigbrother@1.0.1'
+    id 'nf-bigbrother@1.1.0'
 }
 
 bigbrother {
@@ -70,11 +70,11 @@ For a pipeline you only run, an nf-core workflow say, enable the plugin with
 `NXF_PLUGINS_DEFAULT` rather than a `plugins` block:
 
 ```bash
-NXF_PLUGINS_DEFAULT=nf-bigbrother@1.0.1 \
+NXF_PLUGINS_DEFAULT=nf-bigbrother@1.1.0 \
   nextflow run nf-core/demo -r 1.2.0 -profile test,docker --outdir results
 ```
 
-Do **not** reach for `-plugins nf-bigbrother@1.0.1`, and do not put a `plugins`
+Do **not** reach for `-plugins nf-bigbrother@1.1.0`, and do not put a `plugins`
 block in a `-c` config. Both *replace* the pipeline's own `plugins` declaration
 rather than adding to it, which silently unpins whatever the pipeline depends
 on. nf-core/demo 1.2.0 pins `nf-schema@2.7.2`. Unpinned, Nextflow 26.04 resolves
@@ -92,7 +92,7 @@ pipeline's own plugins alongside it in a single block:
 ```groovy
 plugins {
     id 'nf-schema@2.7.2'      // whatever the pipeline already pinned
-    id 'nf-bigbrother@1.0.1'
+    id 'nf-bigbrother@1.1.0'
 }
 ```
 
@@ -175,7 +175,7 @@ nextflow run main.nf
 The workflow used as the real reference is nf-core/rnaseq on the test profile:
 
 ```bash
-NXF_PLUGINS_DEFAULT=nf-bigbrother@1.0.1 \
+NXF_PLUGINS_DEFAULT=nf-bigbrother@1.1.0 \
   nextflow run nf-core/rnaseq -r 3.21.0 -profile test,docker --outdir results
 ```
 
